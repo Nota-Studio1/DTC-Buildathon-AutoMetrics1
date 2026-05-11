@@ -1,0 +1,2991 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Auto.Metrics | Retro Auto Lab</title>
+
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React 18 (UMD) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel (compile JSX in-browser for this demo) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Leaflet map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+      :root {
+        /* Eco-conscious CRT palette */
+        --bg: #06080a;
+        --panel: #18181b;
+        --panel2: #0a0a0b;
+        --line: #27272a;
+        /* Keep var names (amber/teal) to minimize refactors */
+        --amber: #22c55e; /* primary eco green */
+        --amber2: #16a34a; /* darker green */
+        --teal: #34d399; /* mint */
+        --red: #ef4444;
+        --blue: #60a5fa;
+        --sky: #22d3ee;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--bg);
+        color: white;
+        /* Subtle "recycled paper + scanline" texture */
+        background-image:
+          radial-gradient(900px 450px at 15% 20%, rgba(34, 197, 94, 0.08), rgba(0,0,0,0) 60%),
+          radial-gradient(900px 450px at 85% 70%, rgba(34, 211, 238, 0.06), rgba(0,0,0,0) 60%),
+          repeating-linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%, #000),
+          repeating-linear-gradient(45deg, #000 25%, var(--bg) 25%, var(--bg) 75%, #000 75%, #000);
+        background-position: 0 0, 0 0, 0 0, 2px 2px;
+        background-size: 100% 100%, 100% 100%, 4px 4px, 4px 4px;
+      }
+
+      @keyframes scan {
+        from {
+          top: -10%;
+        }
+        to {
+          top: 110%;
+        }
+      }
+
+      .animate-scan {
+        animation: scan 6s linear infinite;
+      }
+
+      /* Retro scrollbar */
+      ::-webkit-scrollbar {
+        width: 12px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--panel);
+        border-left: 2px solid var(--line);
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--amber);
+        border: 2px solid var(--panel);
+      }
+
+      /* CRT */
+      .crt-screen {
+        background: #000;
+        box-shadow: inset 0 0 18px rgba(0, 0, 0, 1);
+        position: relative;
+      }
+      .crt-screen::after {
+        content: " ";
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+          linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+        z-index: 2;
+        background-size: 100% 4px, 6px 100%;
+        pointer-events: none;
+      }
+
+      /* Better focus ring for keyboard */
+      .focus-ring:focus-visible {
+        outline: 2px solid var(--amber);
+        outline-offset: 2px;
+      }
+
+      /* Map CRT overlay */
+      #am-map { height: 380px; width: 100%; }
+      #am-map .leaflet-tile-pane { filter: grayscale(1) contrast(1.15) brightness(0.75) sepia(0.35) hue-rotate(85deg); }
+      .leaflet-control-attribution { display: none !important; }
+      .leaflet-control-zoom a { background: #18181b !important; color: #22c55e !important; border-color: #27272a !important; font-weight: 900; }
+      /* autocomplete suggestion dropdown */
+      .am-suggest { border: 2px solid var(--amber); background: #000; position: absolute; z-index: 3000; width: 100%; max-height: 180px; overflow-y: auto; }
+      .am-suggest-item { padding: 10px 12px; font-size: 10px; border-bottom: 1px solid var(--line); cursor: pointer; text-transform: uppercase; font-weight: 900; color: #a1a1aa; }
+      .am-suggest-item:hover { background: var(--amber); color: #000; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useEffect, useMemo, useRef, useState } = React;
+
+      // -----------------------------
+      // Utilities
+      // -----------------------------
+      const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+      const round = (n, d = 2) => {
+        const p = Math.pow(10, d);
+        return Math.round((Number(n) + Number.EPSILON) * p) / p;
+      };
+      const safeNum = (v, fallback = 0) => {
+        const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+        return Number.isFinite(n) ? n : fallback;
+      };
+      const formatMoney = (value, currency = "USD") =>
+        new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(
+          safeNum(value, 0)
+        );
+      const formatNumber = (value, max = 2) =>
+        new Intl.NumberFormat(undefined, { maximumFractionDigits: max }).format(safeNum(value, 0));
+
+      const useDebounced = (value, delayMs = 250) => {
+        const [debounced, setDebounced] = useState(value);
+        useEffect(() => {
+          const t = setTimeout(() => setDebounced(value), delayMs);
+          return () => clearTimeout(t);
+        }, [value, delayMs]);
+        return debounced;
+      };
+
+      const useLocalStorageState = (key, initial) => {
+        const [state, setState] = useState(() => {
+          try {
+            const raw = localStorage.getItem(key);
+            if (!raw) return typeof initial === "function" ? initial() : initial;
+            return JSON.parse(raw);
+          } catch {
+            return typeof initial === "function" ? initial() : initial;
+          }
+        });
+        useEffect(() => {
+          try {
+            localStorage.setItem(key, JSON.stringify(state));
+          } catch {}
+        }, [key, state]);
+        return [state, setState];
+      };
+
+      const toQuery = (obj) => {
+        const usp = new URLSearchParams();
+        Object.entries(obj).forEach(([k, v]) => {
+          if (v === undefined || v === null || v === "") return;
+          usp.set(k, String(v));
+        });
+        const s = usp.toString();
+        return s ? `?${s}` : "";
+      };
+
+      const parseQuery = () => {
+        const usp = new URLSearchParams(location.search);
+        const out = {};
+        for (const [k, v] of usp.entries()) out[k] = v;
+        return out;
+      };
+
+      const downloadText = (filename, text) => {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      // -----------------------------
+      // Icons (inline)
+      // -----------------------------
+      const IconData = {
+        Car: (
+          <>
+            <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2" />
+            <circle cx="7" cy="17" r="2" />
+            <circle cx="17" cy="17" r="2" />
+          </>
+        ),
+        Database: (
+          <>
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+          </>
+        ),
+        Plus: (
+          <>
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </>
+        ),
+        Activity: <path d="M22 12h-4l-3 9L9 3l-3 9H2" />,
+        MapPin: (
+          <>
+            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+            <circle cx="12" cy="10" r="3" />
+          </>
+        ),
+        DollarSign: (
+          <>
+            <line x1="12" y1="1" x2="12" y2="23" />
+            <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+          </>
+        ),
+        Globe: (
+          <>
+            <circle cx="12" cy="12" r="10" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+          </>
+        ),
+        Terminal: (
+          <>
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </>
+        ),
+        Gauge: (
+          <>
+            <path d="m12 14 4-4" />
+            <path d="M3.34 16A10 10 0 1 1 20.66 16" />
+          </>
+        ),
+        TrendingUp: (
+          <>
+            <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
+            <polyline points="17 6 23 6 23 12" />
+          </>
+        ),
+        BarChart: (
+          <>
+            <line x1="12" y1="20" x2="12" y2="10" />
+            <line x1="18" y1="20" x2="18" y2="4" />
+            <line x1="6" y1="20" x2="6" y2="16" />
+          </>
+        ),
+        Search: <path d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.35-4.35" />,
+        X: (
+          <>
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </>
+        ),
+        Download: (
+          <>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </>
+        ),
+        Share2: (
+          <>
+            <circle cx="18" cy="5" r="3" />
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </>
+        ),
+        Info: (
+          <>
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </>
+        ),
+        Leaf: (
+          <>
+            <path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 9 17 9c-1 4-4 6-6 6-1 0-2-1-2-1s-1 1-2 1Z" />
+            <path d="M18.5 3.5c-3 2.5-6.5 7.5-7 10" />
+          </>
+        ),
+      };
+
+      const Icon = ({ name, size = 24, className = "" }) => (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width={size}
+          height={size}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={className}
+          aria-hidden="true"
+        >
+          {IconData[name]}
+        </svg>
+      );
+
+      // -----------------------------
+      // Data / API
+      // -----------------------------
+      const API_BASE = "https://www.fueleconomy.gov/ws/rest";
+      const CO2_PER_GALLON_G = 8887; // g CO2 / gallon gasoline (EPA)
+      const MI_PER_KM = 0.621371;
+      const L_PER_GAL = 3.785411784;
+
+      const xmlTextToList = (xmlText) => {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+        return Array.from(xmlDoc.getElementsByTagName("text")).map((el) => el.textContent);
+      };
+
+      const xmlTextFirst = (xmlText, tag) => {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xmlText, "text/xml");
+        return doc.getElementsByTagName(tag)[0]?.textContent ?? null;
+      };
+
+      const useFuelEconomyApi = () => {
+        const [years, setYears] = useLocalStorageState("am:years", []);
+        const [makesByYear, setMakesByYear] = useLocalStorageState("am:makesByYear", {});
+        const [modelsByYearMake, setModelsByYearMake] = useLocalStorageState("am:modelsByYearMake", {});
+        const [status, setStatus] = useState({ ok: true, message: "READY" });
+
+        const fetchYears = async () => {
+          try {
+            setStatus({ ok: true, message: "FETCH_YEARS" });
+            const res = await fetch(`${API_BASE}/vehicle/menu/year`);
+            const text = await res.text();
+            const items = xmlTextToList(text).sort((a, b) => Number(b) - Number(a));
+            setYears(items);
+            setStatus({ ok: true, message: "YEARS_OK" });
+            return items;
+          } catch (e) {
+            setStatus({ ok: false, message: "YEARS_FAIL" });
+            return years;
+          }
+        };
+
+        const fetchMakes = async (year) => {
+          if (!year) return [];
+          if (makesByYear[year]?.length) return makesByYear[year];
+          try {
+            setStatus({ ok: true, message: "FETCH_MAKES" });
+            const res = await fetch(`${API_BASE}/vehicle/menu/make?year=${encodeURIComponent(year)}`);
+            const text = await res.text();
+            const items = xmlTextToList(text);
+            setMakesByYear((prev) => ({ ...prev, [year]: items }));
+            setStatus({ ok: true, message: "MAKES_OK" });
+            return items;
+          } catch {
+            setStatus({ ok: false, message: "MAKES_FAIL" });
+            return makesByYear[year] ?? [];
+          }
+        };
+
+        const fetchModels = async (year, make) => {
+          if (!year || !make) return [];
+          const key = `${year}__${make}`;
+          if (modelsByYearMake[key]?.length) return modelsByYearMake[key];
+          try {
+            setStatus({ ok: true, message: "FETCH_MODELS" });
+            const res = await fetch(
+              `${API_BASE}/vehicle/menu/model?year=${encodeURIComponent(year)}&make=${encodeURIComponent(make)}`
+            );
+            const text = await res.text();
+            const items = xmlTextToList(text);
+            setModelsByYearMake((prev) => ({ ...prev, [key]: items }));
+            setStatus({ ok: true, message: "MODELS_OK" });
+            return items;
+          } catch {
+            setStatus({ ok: false, message: "MODELS_FAIL" });
+            return modelsByYearMake[key] ?? [];
+          }
+        };
+
+        const fetchVehicleByMenu = async (year, make, model) => {
+          if (!year || !make || !model) return null;
+          try {
+            setStatus({ ok: true, message: "FETCH_VEHICLE" });
+            const optsRes = await fetch(
+              `${API_BASE}/vehicle/menu/options?year=${encodeURIComponent(year)}&make=${encodeURIComponent(
+                make
+              )}&model=${encodeURIComponent(model)}`
+            );
+            const optsText = await optsRes.text();
+            const vehicleId = xmlTextFirst(optsText, "value");
+            if (!vehicleId) throw new Error("NO_VEHICLE_ID");
+
+            const detailRes = await fetch(`${API_BASE}/vehicle/${encodeURIComponent(vehicleId)}`);
+            const detailText = await detailRes.text();
+            const mpg = xmlTextFirst(detailText, "comb08");
+            const co2 = xmlTextFirst(detailText, "co2TailpipeGpm") ?? xmlTextFirst(detailText, "co2");
+            const fuelType = xmlTextFirst(detailText, "fuelType") ?? "Gas";
+
+            setStatus({ ok: true, message: "VEHICLE_OK" });
+            return {
+              source: "api",
+              id: vehicleId,
+              year,
+              make,
+              model,
+              mpg: mpg ? String(mpg) : "",
+              fuelType,
+              co2TailpipeGpm: co2 ? String(co2) : "",
+            };
+          } catch (e) {
+            setStatus({ ok: false, message: "VEHICLE_FAIL" });
+            return null;
+          }
+        };
+
+        return { years, fetchYears, fetchMakes, fetchModels, fetchVehicleByMenu, status };
+      };
+
+      const getLogoUrl = (make) => {
+        if (!make) return "";
+        const lowerMake = make.toLowerCase().trim();
+        const domainMap = {
+          "alfa romeo": "alfaromeo.com",
+          "aston martin": "astonmartin.com",
+          audi: "audi.com",
+          bentley: "bentleymotors.com",
+          bmw: "bmw.com",
+          bugatti: "bugatti.com",
+          buick: "buick.com",
+          cadillac: "cadillac.com",
+          chevrolet: "chevrolet.com",
+          chrysler: "chrysler.com",
+          dodge: "dodge.com",
+          ferrari: "ferrari.com",
+          fiat: "fiatusa.com",
+          ford: "ford.com",
+          gmc: "gmc.com",
+          honda: "honda.com",
+          hyundai: "hyundai.com",
+          infiniti: "infinitiusa.com",
+          jaguar: "jaguarusa.com",
+          jeep: "jeep.com",
+          kia: "kia.com",
+          lamborghini: "lamborghini.com",
+          "land rover": "landroverusa.com",
+          lexus: "lexus.com",
+          lincoln: "lincoln.com",
+          maserati: "maserati.com",
+          mazda: "mazdausa.com",
+          mclaren: "mclaren.com",
+          "mercedes-benz": "mbusa.com",
+          mercedes: "mbusa.com",
+          mini: "miniusa.com",
+          mitsubishi: "mitsubishicars.com",
+          nissan: "nissanusa.com",
+          porsche: "porsche.com",
+          ram: "ramtrucks.com",
+          "rolls-royce": "rolls-roycemotorcars.com",
+          subaru: "subaru.com",
+          tesla: "tesla.com",
+          toyota: "toyota.com",
+          volkswagen: "vw.com",
+          vw: "vw.com",
+          volvo: "volvocars.com",
+        };
+        const domain = domainMap[lowerMake] || `${lowerMake.replace(/[^a-z0-9]/g, "")}.com`;
+        return `https://logo.clearbit.com/${domain}`;
+      };
+
+      // Best-effort car photo (no API key). If it fails, we fall back to the SVG model.
+      // Uses Unsplash "source" which returns a relevant photo for the query.
+      const getCarPhotoUrl = ({ year, make, model }) => {
+        const q = [year, make, model, "car"].filter(Boolean).join(" ");
+        // `sig` makes the URL change when the vehicle changes (helps avoid sticky cached results).
+        const sig = encodeURIComponent(`${year || ""}-${make || ""}-${model || ""}`.trim() || "car");
+        return `https://source.unsplash.com/1200x500/?${encodeURIComponent(q)}&sig=${sig}`;
+      };
+
+      // Wikimedia Commons image search (CORS-friendly with origin=*)
+      // Returns a thumbnail URL when a reasonable match is found.
+      const COMMONS_API = "https://commons.wikimedia.org/w/api.php";
+      const commonsCacheKey = (year, make, model) =>
+        `am:commonsImg:${String(year || "").trim()}|${String(make || "").trim()}|${String(model || "").trim()}`;
+
+      const fetchCommonsCarThumb = async ({ year, make, model, thumbPx = 1200 }) => {
+        const qRaw = [year, make, model].filter(Boolean).join(" ").trim();
+        const q = qRaw || [make, model].filter(Boolean).join(" ").trim();
+        if (!q) return null;
+
+        const searchUrl =
+          `${COMMONS_API}?` +
+          new URLSearchParams({
+            action: "query",
+            format: "json",
+            origin: "*",
+            generator: "search",
+            gsrsearch: `${q} car`,
+            gsrnamespace: "6", // File:
+            gsrlimit: "5",
+            prop: "imageinfo",
+            iiprop: "url",
+            iiurlwidth: String(thumbPx),
+          }).toString();
+
+        const res = await fetch(searchUrl);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const pages = data?.query?.pages ? Object.values(data.query.pages) : [];
+        if (!pages.length) return null;
+
+        // Pick the first entry that has a thumbnail.
+        for (const p of pages) {
+          const ii = p?.imageinfo?.[0];
+          const thumb = ii?.thumburl || ii?.url || null;
+          if (thumb) return thumb;
+        }
+        return null;
+      };
+
+      // -----------------------------
+      // Calculation model
+      // -----------------------------
+      const compute = ({
+        vehicle,
+        distanceMi,
+        roundTrip,
+        gasPricePerGal,
+        electricityPricePerKWh,
+        gridIntensity_gPerKWh,
+        mode,
+        units,
+      }) => {
+        if (!vehicle) return null;
+
+        const distMi = safeNum(distanceMi, 0) * (roundTrip ? 2 : 1);
+        const isEV = mode === "EV";
+        const isHybrid = mode === "Hybrid";
+        const isICE = mode === "ICE";
+
+        let fuelGallons = 0;
+        let kwh = 0;
+        let totalCost = 0;
+        let totalCO2_kg = 0;
+        let co2PerMile_kg = 0;
+        let costPerMile = 0;
+        let kwhPerMile = 0;
+        let fuelGalPerMile = 0;
+
+        if (isEV) {
+          const miPerKWh = clamp(safeNum(vehicle.miPerKWh, 3), 0.1, 20);
+          kwh = distMi / miPerKWh;
+          totalCost = kwh * clamp(safeNum(electricityPricePerKWh, 0.15), 0, 5);
+          totalCO2_kg = (kwh * clamp(safeNum(gridIntensity_gPerKWh, 400), 0, 2000)) / 1000;
+          kwhPerMile = distMi > 0 ? kwh / distMi : 0;
+        } else {
+          const mpg = clamp(safeNum(vehicle.mpg, 25), 1, 200);
+          fuelGallons = distMi / mpg;
+          totalCost = fuelGallons * clamp(safeNum(gasPricePerGal, 3.5), 0, 50);
+          fuelGalPerMile = distMi > 0 ? fuelGallons / distMi : 0;
+
+          // Prefer API CO2 tailpipe grams/mile if present and plausible; else derive from fuel.
+          const gpm = safeNum(vehicle.co2TailpipeGpm, NaN);
+          const co2PerMile_g =
+            Number.isFinite(gpm) && gpm > 50 && gpm < 3000 ? gpm : CO2_PER_GALLON_G / mpg;
+          totalCO2_kg = (distMi * co2PerMile_g) / 1000;
+
+          // Very rough hybrid adjustment: if user says "Hybrid" but provides mpg, treat mpg as already blended.
+          // This keeps the model consistent and avoids double-discounting.
+          if (isHybrid) {
+            // no extra adjustments
+          }
+        }
+
+        co2PerMile_kg = distMi > 0 ? totalCO2_kg / distMi : 0;
+        costPerMile = distMi > 0 ? totalCost / distMi : 0;
+
+        // Benchmarks
+        const bench = {
+          avgGasMpg: 25,
+          sedan_gpm: 411,
+          truck_gpm: 550,
+          hybrid_gpm: 200,
+        };
+        const truckCO2_kg = (distMi * bench.truck_gpm) / 1000;
+        const sedanCO2_kg = (distMi * bench.sedan_gpm) / 1000;
+        const hybridCO2_kg = (distMi * bench.hybrid_gpm) / 1000;
+        const benchCostPerMile_avgGas = clamp(safeNum(gasPricePerGal, 3.5), 0, 50) / bench.avgGasMpg;
+
+        // Unit presentation
+        const distanceDisplay = units.distance === "km" ? distMi / MI_PER_KM : distMi;
+        const distanceUnit = units.distance;
+        const fuelDisplay =
+          units.fuelVolume === "L" ? fuelGallons * L_PER_GAL : fuelGallons;
+        const fuelUnit = units.fuelVolume;
+
+        return {
+          distMi,
+          distanceDisplay,
+          distanceUnit,
+          fuelGallons,
+          fuelDisplay,
+          fuelUnit,
+          kwh,
+          totalCost,
+          totalCO2_kg,
+          co2PerMile_kg,
+          costPerMile,
+          kwhPerMile,
+          fuelGalPerMile,
+          co2VsTruck_kg: truckCO2_kg - totalCO2_kg,
+          benchmarks: {
+            truckCO2_kg,
+            sedanCO2_kg,
+            hybridCO2_kg,
+            avgGasCost: (distMi / bench.avgGasMpg) * clamp(safeNum(gasPricePerGal, 3.5), 0, 50),
+            avgGasCostPerMile: benchCostPerMile_avgGas,
+          },
+        };
+      };
+
+      const METERS_PER_MI = 1609.344;
+      const PHOTON_API = "https://photon.komoot.io/api";
+      const OSRM_DRIVING = "https://router.project-osrm.org/route/v1/driving";
+
+      const geocodePhoton = async (query) => {
+        const q = String(query ?? "").trim();
+        if (!q) return null;
+        const url = `${PHOTON_API}/?q=${encodeURIComponent(q)}&limit=1`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const f = data?.features?.[0];
+        if (!f?.geometry?.coordinates) return null;
+        const [lon, lat] = f.geometry.coordinates;
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        const name =
+          [f.properties?.name, f.properties?.street, f.properties?.city, f.properties?.country]
+            .filter(Boolean)
+            .join(", ") || q;
+        return { lat, lon, label: name };
+      };
+
+      const fetchOsrmDrivingRoutes = async (from, to) => {
+        const coords = `${from.lon},${from.lat};${to.lon},${to.lat}`;
+        const url = `${OSRM_DRIVING}/${coords}?alternatives=true&overview=full&geometries=geojson&steps=false`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Routing HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.code !== "Ok") throw new Error(String(data.message || "No drivable route for these points."));
+        return Array.isArray(data.routes) ? data.routes : [];
+      };
+
+      const buildEcoTips = ({ activeMode, stats, mpgEff, miPerKWhEff }) => {
+        const tips = [];
+        if (!stats) return tips;
+
+        tips.push(
+          "Combine errands into one loop instead of many short cold starts—engines and catalytic converters stay warmer and use less fuel per mile."
+        );
+
+        if (activeMode === "EV") {
+          tips.push(
+            "Precondition cabin and battery while plugged in at home; it trims on-road kWh the same way idling with heat on burns gas in an ICE vehicle."
+          );
+          tips.push(
+            "Smooth acceleration and early regen braking raise mi/kWh; treat the accelerator like a volume knob, not a switch."
+          );
+          if (Number.isFinite(miPerKWhEff) && miPerKWhEff < 3)
+            tips.push(
+              `Your efficiency (~${round(miPerKWhEff, 1)} mi/kWh) has headroom—check tire pressure, roof racks, and climate settings.`
+            );
+        } else if (activeMode === "Hybrid") {
+          tips.push(
+            "Hybrids reward steady throttle and gentle braking; pulse-and-glide in light traffic can help, but never sacrifice safe following distance."
+          );
+          tips.push("Use eco mode if your vehicle has one; it trades a little responsiveness for fewer engine restarts and gentler assist.");
+        } else {
+          tips.push(
+            "Every 1 psi below the door-jamb tire pressure recommendation can slightly raise rolling resistance—recheck pressures monthly when the tires are cold."
+          );
+          tips.push(
+            "Highway speeds above ~60 mph often increase drag faster than they save time; for long trips, a modest speed reduction is one of the largest single-tank levers."
+          );
+          tips.push("Remove unused roof boxes and racks when not needed; they add aerodynamic drag even when empty.");
+          if (Number.isFinite(mpgEff) && mpgEff < 22)
+            tips.push(
+              `At ~${round(mpgEff, 0)} MPG combined, small maintenance wins (air filter, alignment, spark plugs on schedule) matter more than for a high-MPG vehicle.`
+            );
+        }
+
+        if (stats.co2VsTruck_kg > 0) {
+          tips.push(
+            `On this distance you emit about ${formatNumber(stats.co2VsTruck_kg, 1)} kg less CO₂ than a rough truck benchmark—same trip in a lighter right-sized vehicle compounds that gap.`
+          );
+        }
+
+        tips.push(
+          "Use the trip planner below: when two map routes are similar in time, the shorter distance is usually the better gas and CO₂ default (fewer miles at your current efficiency)."
+        );
+
+        return tips.slice(0, 10);
+      };
+
+      // -----------------------------
+      // UI atoms
+      // -----------------------------
+      const RetroLabel = ({ children }) => (
+        <div className="text-[10px] sm:text-xs font-mono text-[var(--amber)] uppercase font-black tracking-widest">
+          {children}
+        </div>
+      );
+
+      const RetroInput = (props) => (
+        <input
+          {...props}
+          className={
+            "w-full crt-screen p-3 sm:p-4 text-sm sm:text-base font-black outline-none text-white border-2 border-[var(--line)] transition-all focus:border-[var(--amber)] focus-ring " +
+            (props.className ?? "")
+          }
+        />
+      );
+
+      const RetroSelect = (props) => (
+        <select
+          {...props}
+          className={
+            "w-full h-full bg-transparent px-2 text-sm sm:text-base font-bold outline-none text-[var(--amber)] cursor-pointer appearance-none text-center focus-ring " +
+            (props.className ?? "")
+          }
+        />
+      );
+
+      const Pill = ({ color = "bg-[var(--amber)]", children }) => (
+        <span className={"text-[10px] sm:text-xs text-black px-2 py-0.5 font-mono tracking-widest uppercase font-black whitespace-nowrap " + color}>
+          {children}
+        </span>
+      );
+
+      const Section = ({ title, badge, children, icon }) => (
+        <div className="bg-[var(--panel)] border-t-8 border-[var(--line)] border-x-2 border-b-2 p-5 sm:p-8 shadow-[0_10px_30px_rgba(0,0,0,0.8)] relative">
+          {badge ? (
+            <div className="absolute top-0 right-0 bg-[var(--line)] text-zinc-400 font-mono text-[10px] px-3 py-1 font-bold z-10">
+              {badge}
+            </div>
+          ) : null}
+          <div className="flex items-center gap-3 mb-4 sm:mb-6 border-b-2 border-[var(--line)] pb-2">
+            {icon ? <Icon name={icon} size={24} className="text-[var(--amber)] shrink-0" /> : null}
+            <h2 className="text-lg sm:text-xl md:text-2xl font-black uppercase tracking-widest text-white italic leading-tight">
+              {title}
+            </h2>
+          </div>
+          {children}
+        </div>
+      );
+
+      // -----------------------------
+      // Main App
+      // -----------------------------
+      const App = () => {
+        const reportRef = useRef(null);
+        const query = useMemo(() => parseQuery(), []);
+
+        // Leaflet map refs
+        const mapRef = useRef(null);
+        const mapInstanceRef = useRef(null);
+        const routeLayersRef = useRef([]);
+
+        const api = useFuelEconomyApi();
+
+        // View modes:
+        // - simulate: use API vehicle picker
+        // - custom: manual vehicle spec
+        const [view, setView] = useLocalStorageState("am:view", query.view || "simulate");
+
+        // Units & economics
+        const [units, setUnits] = useLocalStorageState("am:units", {
+          distance: query.du || "mi", // mi | km
+          fuelVolume: query.fu || "gal", // gal | L
+          currency: query.cur || "USD",
+        });
+
+        const [locationLabel, setLocationLabel] = useLocalStorageState("am:location", query.loc || "Dublin, OH");
+        const [distanceInput, setDistanceInput] = useLocalStorageState("am:distance", query.dist || "25");
+        const [roundTrip, setRoundTrip] = useLocalStorageState("am:roundTrip", query.rt === "1" ? true : false);
+
+        const [gasPriceInput, setGasPriceInput] = useLocalStorageState("am:gasPrice", query.gas || "3.55");
+        const [electricityPriceInput, setElectricityPriceInput] = useLocalStorageState("am:elec", query.elec || "0.15");
+        const [gridIntensityInput, setGridIntensityInput] = useLocalStorageState("am:grid", query.grid || "400"); // gCO2/kWh
+
+        // API picker state
+        const [years, setYears] = useState(api.years?.length ? api.years : []);
+        const [selectedYear, setSelectedYear] = useLocalStorageState("am:selectedYear", query.y || "1991");
+        const [makes, setMakes] = useState([]);
+        const [selectedMake, setSelectedMake] = useLocalStorageState("am:selectedMake", query.mk || "");
+        const [models, setModels] = useState([]);
+        const [selectedModel, setSelectedModel] = useLocalStorageState("am:selectedModel", query.md || "");
+        const [selectedVehicle, setSelectedVehicle] = useLocalStorageState("am:selectedVehicle", null);
+        const [isLoading, setIsLoading] = useState(false);
+        const [logoError, setLogoError] = useState(false);
+        const [showReport, setShowReport] = useLocalStorageState("am:showReport", false);
+        const [hoverDistMi, setHoverDistMi] = useState(null);
+
+        const [routeFromInput, setRouteFromInput] = useLocalStorageState("am:routeFrom", "");
+        const [routeToInput, setRouteToInput] = useLocalStorageState("am:routeTo", "");
+        const [routeLoading, setRouteLoading] = useState(false);
+        const [routeError, setRouteError] = useState("");
+        const [routeResults, setRouteResults] = useState([]);
+        const [routeEndpoints, setRouteEndpoints] = useState(null);
+        const [routeGeodata, setRouteGeodata] = useState([]); // [{geometry, isBest}]
+
+        // Search filters for dropdowns
+        const [makeFilter, setMakeFilter] = useState("");
+        const [modelFilter, setModelFilter] = useState("");
+        const makeFilterD = useDebounced(makeFilter, 200);
+        const modelFilterD = useDebounced(modelFilter, 200);
+
+        // Saved presets + compare list
+        const [presets, setPresets] = useLocalStorageState("am:presets", []);
+        const [compareList, setCompareList] = useLocalStorageState("am:compare", []);
+        const [recent, setRecent] = useLocalStorageState("am:recent", []);
+
+        // Custom vehicle spec
+        const [customVehicle, setCustomVehicle] = useLocalStorageState("am:customVehicle", {
+          label: "Ferrari Testarossa",
+          mode: "ICE", // ICE | Hybrid | EV
+          mpg: "12",
+          miPerKWh: "3.2",
+        });
+
+        useEffect(() => {
+          if (selectedVehicle?.make) setLogoError(false);
+        }, [selectedVehicle?.make]);
+
+        // Initialize Leaflet map lazily on first routeGeodata arrival, and update whenever it changes
+        useEffect(() => {
+          if (!routeGeodata.length) return;
+          const container = document.getElementById("am-map");
+          if (!container) return;
+
+          // Init map once
+          if (!mapInstanceRef.current) {
+            const map = L.map(container, { zoomControl: true }).setView([39.82, -98.57], 4);
+            L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19 }).addTo(map);
+            mapInstanceRef.current = map;
+          }
+
+          const map = mapInstanceRef.current;
+          // Remove old route layers
+          routeLayersRef.current.forEach((l) => map.removeLayer(l));
+          routeLayersRef.current = [];
+
+          const allBounds = [];
+          routeGeodata.forEach(({ geometry, isBest }) => {
+            if (!geometry) return;
+            const layer = L.geoJSON(geometry, {
+              style: {
+                color: isBest ? "#22c55e" : "#60a5fa",
+                weight: isBest ? 6 : 4,
+                opacity: isBest ? 0.95 : 0.55,
+                dashArray: isBest ? null : "10,8",
+              },
+            }).addTo(map);
+            routeLayersRef.current.push(layer);
+            allBounds.push(layer.getBounds());
+          });
+
+          if (allBounds.length) {
+            const combined = allBounds.reduce((acc, b) => acc.extend(b), allBounds[0]);
+            // invalidateSize ensures Leaflet knows the container size (it was hidden before)
+            map.invalidateSize();
+            map.fitBounds(combined, { padding: [40, 40] });
+          }
+        }, [routeGeodata]);
+
+        // Bootstrap years (cache-backed)
+        useEffect(() => {
+          let cancelled = false;
+          (async () => {
+            const y = years?.length ? years : await api.fetchYears();
+            if (cancelled) return;
+            setYears(y);
+          })();
+          return () => {
+            cancelled = true;
+          };
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []);
+
+        // Fetch makes when year changes
+        useEffect(() => {
+          if (!selectedYear) return;
+          let cancelled = false;
+          (async () => {
+            setIsLoading(true);
+            const m = await api.fetchMakes(selectedYear);
+            if (cancelled) return;
+            setMakes(m);
+            if (!m.includes(selectedMake)) setSelectedMake("");
+            setSelectedModel("");
+            setModels([]);
+            setIsLoading(false);
+          })();
+          return () => {
+            cancelled = true;
+          };
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [selectedYear]);
+
+        // Fetch models when make changes
+        useEffect(() => {
+          if (!selectedYear || !selectedMake) return;
+          let cancelled = false;
+          (async () => {
+            setIsLoading(true);
+            const m = await api.fetchModels(selectedYear, selectedMake);
+            if (cancelled) return;
+            setModels(m);
+            if (!m.includes(selectedModel)) setSelectedModel("");
+            setIsLoading(false);
+          })();
+          return () => {
+            cancelled = true;
+          };
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [selectedMake, selectedYear]);
+
+        const filteredMakes = useMemo(() => {
+          if (!makeFilterD.trim()) return makes;
+          const q = makeFilterD.trim().toLowerCase();
+          return makes.filter((m) => m.toLowerCase().includes(q));
+        }, [makes, makeFilterD]);
+
+        const filteredModels = useMemo(() => {
+          if (!modelFilterD.trim()) return models;
+          const q = modelFilterD.trim().toLowerCase();
+          return models.filter((m) => m.toLowerCase().includes(q));
+        }, [models, modelFilterD]);
+
+        const setAndFetchVehicle = async (model) => {
+          setSelectedModel(model);
+          if (!model) return;
+          setIsLoading(true);
+          const v = await api.fetchVehicleByMenu(selectedYear, selectedMake, model);
+          if (v) {
+            setSelectedVehicle(v);
+            setShowReport(false);
+            setRecent((prev) => {
+              const next = [{ year: v.year, make: v.make, model: v.model, id: v.id }, ...prev];
+              const seen = new Set();
+              return next.filter((x) => {
+                const k = `${x.year}|${x.make}|${x.model}|${x.id}`;
+                if (seen.has(k)) return false;
+                seen.add(k);
+                return true;
+              }).slice(0, 8);
+            });
+          }
+          setIsLoading(false);
+        };
+
+        const activeVehicle = view === "custom" ? customVehicle : selectedVehicle;
+        const activeMode = view === "custom" ? customVehicle.mode : inferModeFromFuelType(selectedVehicle?.fuelType);
+
+        const stats = useMemo(() => {
+          const distanceRaw = safeNum(distanceInput, 0);
+          const distanceMi = units.distance === "km" ? distanceRaw * MI_PER_KM : distanceRaw;
+
+          // Normalize vehicle shape
+          const v =
+            view === "custom"
+              ? {
+                  label: customVehicle.label,
+                  mpg: customVehicle.mpg,
+                  miPerKWh: customVehicle.miPerKWh,
+                  co2TailpipeGpm: "",
+                }
+              : selectedVehicle
+                ? {
+                    label: `${selectedVehicle.year} ${selectedVehicle.make} ${selectedVehicle.model}`,
+                    mpg: selectedVehicle.mpg,
+                    co2TailpipeGpm: selectedVehicle.co2TailpipeGpm,
+                    miPerKWh: "",
+                  }
+                : null;
+
+          if (!v) return null;
+
+          const gasPricePerGal = safeNum(gasPriceInput, 0);
+          const electricityPricePerKWh = safeNum(electricityPriceInput, 0);
+          const gridIntensity_gPerKWh = safeNum(gridIntensityInput, 0);
+
+          return compute({
+            vehicle: v,
+            distanceMi,
+            roundTrip,
+            gasPricePerGal,
+            electricityPricePerKWh,
+            gridIntensity_gPerKWh,
+            mode: activeMode,
+            units,
+          });
+        }, [
+          distanceInput,
+          gasPriceInput,
+          electricityPriceInput,
+          gridIntensityInput,
+          units,
+          roundTrip,
+          view,
+          customVehicle,
+          selectedVehicle,
+          activeMode,
+        ]);
+
+        const compareStats = useMemo(() => {
+          if (!compareList?.length) return [];
+          const distanceRaw = safeNum(distanceInput, 0);
+          const distanceMi = units.distance === "km" ? distanceRaw * MI_PER_KM : distanceRaw;
+          const gasPricePerGal = safeNum(gasPriceInput, 0);
+          const electricityPricePerKWh = safeNum(electricityPriceInput, 0);
+          const gridIntensity_gPerKWh = safeNum(gridIntensityInput, 0);
+
+          return compareList
+            .map((c) => {
+              const mode = c.mode || inferModeFromFuelType(c.fuelType);
+              const base = compute({
+                vehicle: c,
+                distanceMi,
+                roundTrip,
+                gasPricePerGal,
+                electricityPricePerKWh,
+                gridIntensity_gPerKWh,
+                mode,
+                units,
+              });
+              if (!base) return null;
+              return { key: c.key, label: c.label, mode, raw: c, stats: base };
+            })
+            .filter(Boolean);
+        }, [compareList, distanceInput, units, gasPriceInput, electricityPriceInput, gridIntensityInput, roundTrip]);
+
+        const mpgEff = view === "custom" ? safeNum(customVehicle.mpg, NaN) : safeNum(selectedVehicle?.mpg, NaN);
+        const miPerKWhEff = view === "custom" ? safeNum(customVehicle.miPerKWh, NaN) : NaN;
+
+        const ecoTips = useMemo(
+          () => buildEcoTips({ activeMode, stats, mpgEff, miPerKWhEff }),
+          [activeMode, stats, mpgEff, miPerKWhEff]
+        );
+
+        const getVehiclePayload = () => {
+          if (view === "custom")
+            return {
+              label: customVehicle.label,
+              mpg: customVehicle.mpg,
+              miPerKWh: customVehicle.miPerKWh,
+              co2TailpipeGpm: "",
+            };
+          if (selectedVehicle)
+            return {
+              label: `${selectedVehicle.year} ${selectedVehicle.make} ${selectedVehicle.model}`,
+              mpg: selectedVehicle.mpg,
+              co2TailpipeGpm: selectedVehicle.co2TailpipeGpm,
+              miPerKWh: "",
+            };
+          return null;
+        };
+
+        const runRoutePlanner = async () => {
+          setRouteError("");
+          setRouteResults([]);
+          setRouteEndpoints(null);
+          setRouteGeodata([]);
+          const v = getVehiclePayload();
+          if (!v) {
+            setRouteError("Select or configure a vehicle first.");
+            return;
+          }
+          if (!String(routeFromInput).trim() || !String(routeToInput).trim()) {
+            setRouteError("Enter both start and destination.");
+            return;
+          }
+          setRouteLoading(true);
+          try {
+            const [a, b] = await Promise.all([geocodePhoton(routeFromInput), geocodePhoton(routeToInput)]);
+            if (!a) throw new Error("Could not geocode start. Try city, region, and country.");
+            if (!b) throw new Error("Could not geocode destination. Try city, region, and country.");
+            const routes = await fetchOsrmDrivingRoutes(a, b);
+            if (!routes.length) throw new Error("No routes returned.");
+            const gasPricePerGal = safeNum(gasPriceInput, 0);
+            const electricityPricePerKWh = safeNum(electricityPriceInput, 0);
+            const gridIntensity_gPerKWh = safeNum(gridIntensityInput, 0);
+            const rows = routes.map((r, idx) => {
+              const distMi = r.distance / METERS_PER_MI;
+              const est = compute({
+                vehicle: v,
+                distanceMi: distMi,
+                roundTrip: false,
+                gasPricePerGal,
+                electricityPricePerKWh,
+                gridIntensity_gPerKWh,
+                mode: activeMode,
+                units,
+              });
+              return {
+                key: idx,
+                distanceM: r.distance,
+                durationS: r.duration,
+                distMi,
+                est,
+                geometry: r.geometry,
+              };
+            });
+            rows.sort((x, y) => x.distanceM - y.distanceM);
+            const annotated = rows.map((row, i) => ({
+              ...row,
+              rank: i + 1,
+              isBestDistance: i === 0,
+              label: i === 0 ? "Shortest distance (best fuel proxy)" : `Alternative ${i}`,
+            }));
+            setRouteEndpoints({ from: a.label, to: b.label });
+            setRouteResults(annotated);
+            // Feed geometry to map
+            setRouteGeodata(annotated.map((r) => ({ geometry: r.geometry, isBest: r.isBestDistance })));
+          } catch (e) {
+            setRouteError(e?.message || "Routing failed. Public demo services may be rate-limited—try again shortly.");
+          } finally {
+            setRouteLoading(false);
+          }
+        };
+
+        const applyBestRouteDistance = () => {
+          const best = routeResults.find((r) => r.isBestDistance);
+          if (!best) return;
+          const raw = units.distance === "km" ? best.distMi / MI_PER_KM : best.distMi;
+          setDistanceInput(String(round(raw, 1)));
+        };
+
+        const generateReport = () => {
+          setShowReport(true);
+          setTimeout(() => reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
+        };
+
+        const MAX_GRAPH_MI = 500;
+        const maxGraphDisplay = units.distance === "km" ? MAX_GRAPH_MI / MI_PER_KM : MAX_GRAPH_MI;
+        const graphUnitLabel = units.distance.toUpperCase();
+
+        const handleGraphHover = (e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = clamp(e.clientX - rect.left, 0, rect.width);
+          const pct = rect.width > 0 ? x / rect.width : 0;
+          setHoverDistMi(pct * MAX_GRAPH_MI);
+        };
+        const clearGraphHover = () => setHoverDistMi(null);
+
+        const addToCompare = () => {
+          if (!stats) return;
+          const current =
+            view === "custom"
+              ? {
+                  key: `custom:${Date.now()}`,
+                  label: customVehicle.label || "Custom Vehicle",
+                  mpg: customVehicle.mpg,
+                  miPerKWh: customVehicle.miPerKWh,
+                  mode: customVehicle.mode,
+                  fuelType: customVehicle.mode,
+                  co2TailpipeGpm: "",
+                }
+              : selectedVehicle
+                ? {
+                    key: `api:${selectedVehicle.id}`,
+                    label: `${selectedVehicle.year} ${selectedVehicle.make} ${selectedVehicle.model}`,
+                    mpg: selectedVehicle.mpg,
+                    miPerKWh: "",
+                    mode: inferModeFromFuelType(selectedVehicle.fuelType),
+                    fuelType: selectedVehicle.fuelType,
+                    co2TailpipeGpm: selectedVehicle.co2TailpipeGpm,
+                  }
+                : null;
+          if (!current) return;
+          setCompareList((prev) => {
+            const next = [current, ...prev.filter((x) => x.key !== current.key)];
+            return next.slice(0, 4);
+          });
+        };
+
+        const removeCompare = (key) => setCompareList((prev) => prev.filter((x) => x.key !== key));
+        const clearCompare = () => setCompareList([]);
+
+        const savePreset = () => {
+          const preset = {
+            id: `p:${Date.now()}`,
+            name:
+              (view === "custom" ? customVehicle.label : selectedVehicle ? `${selectedVehicle.make} ${selectedVehicle.model}` : "Preset") +
+              ` @ ${distanceInput}${units.distance}`,
+            createdAt: Date.now(),
+            state: {
+              view,
+              units,
+              locationLabel,
+              distanceInput,
+              roundTrip,
+              gasPriceInput,
+              electricityPriceInput,
+              gridIntensityInput,
+              selectedYear,
+              selectedMake,
+              selectedModel,
+              selectedVehicle,
+              customVehicle,
+            },
+          };
+          setPresets((prev) => [preset, ...prev].slice(0, 12));
+        };
+
+        const loadPreset = (p) => {
+          const s = p?.state;
+          if (!s) return;
+          setView(s.view);
+          setUnits(s.units);
+          setLocationLabel(s.locationLabel);
+          setDistanceInput(s.distanceInput);
+          setRoundTrip(Boolean(s.roundTrip));
+          setGasPriceInput(s.gasPriceInput);
+          setElectricityPriceInput(s.electricityPriceInput);
+          setGridIntensityInput(s.gridIntensityInput);
+          setSelectedYear(s.selectedYear);
+          setSelectedMake(s.selectedMake);
+          setSelectedModel(s.selectedModel);
+          setSelectedVehicle(s.selectedVehicle);
+          setCustomVehicle(s.customVehicle);
+          setShowReport(false);
+        };
+
+        const deletePreset = (id) => setPresets((prev) => prev.filter((p) => p.id !== id));
+
+        const shareLink = async () => {
+          const q = {
+            view,
+            du: units.distance,
+            fu: units.fuelVolume,
+            cur: units.currency,
+            loc: locationLabel,
+            dist: distanceInput,
+            rt: roundTrip ? "1" : "0",
+            gas: gasPriceInput,
+            elec: electricityPriceInput,
+            grid: gridIntensityInput,
+            y: selectedYear,
+            mk: selectedMake,
+            md: selectedModel,
+          };
+          const url = `${location.origin}${location.pathname}${toQuery(q)}`;
+          try {
+            await navigator.clipboard.writeText(url);
+            alert("Share link copied to clipboard.");
+          } catch {
+            prompt("Copy link:", url);
+          }
+        };
+
+        const exportJson = () => {
+          const payload = {
+            generatedAt: new Date().toISOString(),
+            app: "Auto.Metrics",
+            view,
+            units,
+            locationLabel,
+            distanceInput,
+            roundTrip,
+            economics: {
+              gasPriceInput,
+              electricityPriceInput,
+              gridIntensityInput,
+            },
+            vehicle: view === "custom" ? { ...customVehicle } : { ...selectedVehicle },
+            stats,
+            compare: compareStats,
+          };
+          downloadText("auto-metrics-report.json", JSON.stringify(payload, null, 2));
+        };
+
+        const exportCsv = () => {
+          const rows = [
+            ["label", "mode", "distance", "distance_unit", "co2_kg", "cost", "fuel", "fuel_unit", "kwh"],
+          ];
+          const mainRow = stats
+            ? [
+                view === "custom" ? customVehicle.label : `${selectedVehicle?.year ?? ""} ${selectedVehicle?.make ?? ""} ${selectedVehicle?.model ?? ""}`.trim(),
+                activeMode,
+                stats.distanceDisplay,
+                stats.distanceUnit,
+                stats.totalCO2_kg,
+                stats.totalCost,
+                stats.fuelDisplay,
+                stats.fuelUnit,
+                stats.kwh,
+              ]
+            : null;
+          if (mainRow) rows.push(mainRow);
+          compareStats.forEach((c) => {
+            rows.push([
+              c.label,
+              c.mode,
+              c.stats.distanceDisplay,
+              c.stats.distanceUnit,
+              c.stats.totalCO2_kg,
+              c.stats.totalCost,
+              c.stats.fuelDisplay,
+              c.stats.fuelUnit,
+              c.stats.kwh,
+            ]);
+          });
+          const csv = rows
+            .map((r) =>
+              r
+                .map((x) => {
+                  const s = String(x ?? "");
+                  return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replaceAll('"', '""')}"` : s;
+                })
+                .join(",")
+            )
+            .join("\n");
+          downloadText("auto-metrics-report.csv", csv);
+        };
+
+        const apiIndicator = api.status.ok ? (
+          <span className="text-black bg-[var(--teal)] px-2 py-1 font-black text-[10px] sm:text-xs tracking-widest uppercase shadow-[0_0_10px_var(--teal)]">
+            API: OK
+          </span>
+        ) : (
+          <span className="text-black bg-[var(--red)] px-2 py-1 font-black text-[10px] sm:text-xs tracking-widest uppercase shadow-[0_0_10px_var(--red)]">
+            API: DEGRADED
+          </span>
+        );
+
+        return (
+          <div className="min-h-screen text-white font-sans relative overflow-x-hidden selection:bg-[var(--amber)]/40 pb-20">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 relative z-10">
+              {/* Header */}
+              <header className="mb-8 sm:mb-12 border-b-4 border-[var(--amber)] pb-6 bg-[var(--panel)] p-6 shadow-[0_5px_15px_rgba(0,0,0,0.8)] border-x-2 border-t-2 border-[var(--line)]">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+                  <div className="flex items-center gap-4 sm:gap-6 min-w-0">
+                    <div className="w-14 h-14 sm:w-20 sm:h-20 bg-gradient-to-b from-[var(--amber)] to-[var(--amber2)] flex items-center justify-center border-2 border-black shadow-[inset_0_0_10px_rgba(255,255,255,0.5)] shrink-0">
+                      <Icon name="Car" size={32} className="text-black" />
+                    </div>
+                    <div className="min-w-0">
+                      <h1 className="font-black tracking-tighter text-3xl sm:text-5xl md:text-6xl uppercase italic leading-none text-white drop-shadow-[2px_2px_0px_var(--amber)] truncate">
+                        AUTO<span className="text-[var(--amber)]">.METRICS</span>
+                      </h1>
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <Pill>VOL. 84</Pill>
+                        <span className="text-[10px] sm:text-xs text-zinc-300 font-mono tracking-widest uppercase font-bold border border-[var(--line)] px-2 py-0.5 whitespace-nowrap hidden sm:inline-block">
+                          DOE DATA + ECO MODELS + NAV_MATRIX
+                        </span>
+                        {apiIndicator}
+                        <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-400">
+                          {`IMPACT > AESTHETICS`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex w-full md:w-auto bg-black p-1 border-2 border-[var(--line)] shadow-inner shrink-0">
+                    <button
+                      onClick={() => setView("simulate")}
+                      className={
+                        "focus-ring flex-1 md:flex-none px-4 sm:px-8 py-3 text-xs font-black uppercase tracking-widest transition-all border-2 " +
+                        (view === "simulate"
+                          ? "bg-[var(--amber)] text-black border-[var(--amber)]"
+                          : "bg-[var(--panel)] text-zinc-400 border-[var(--line)] hover:bg-[var(--line)] hover:text-white")
+                      }
+                    >
+                      Public Fleet
+                    </button>
+                    <button
+                      onClick={() => setView("custom")}
+                      className={
+                        "focus-ring flex-1 md:flex-none px-4 sm:px-8 py-3 text-xs font-black uppercase tracking-widest transition-all border-2 " +
+                        (view === "custom"
+                          ? "bg-[var(--amber)] text-black border-[var(--amber)]"
+                          : "bg-[var(--panel)] text-zinc-400 border-[var(--line)] hover:bg-[var(--line)] hover:text-white")
+                      }
+                    >
+                      Custom Spec
+                    </button>
+                  </div>
+                </div>
+
+                {/* Top action strip */}
+                <div className="mt-6 flex flex-col md:flex-row gap-3 md:items-center md:justify-between border-t border-[var(--line)] pt-4">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={savePreset}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--amber)] px-3 py-2 text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-200"
+                      disabled={!stats}
+                      title={!stats ? "Select or input a vehicle first." : "Save this configuration to presets."}
+                    >
+                      Save Preset
+                    </button>
+                    <button
+                      onClick={addToCompare}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--amber)] px-3 py-2 text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-200"
+                      disabled={!stats}
+                      title={!stats ? "Select or input a vehicle first." : "Add current vehicle to compare list."}
+                    >
+                      Add to Compare
+                    </button>
+                    <button
+                      onClick={shareLink}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-white px-3 py-2 text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-200 inline-flex items-center gap-2"
+                      title="Copy a shareable link to clipboard."
+                    >
+                      <Icon name="Share2" size={16} className="text-white" /> Share
+                    </button>
+                    <button
+                      onClick={exportJson}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--amber)] px-3 py-2 text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-200 inline-flex items-center gap-2"
+                      disabled={!stats}
+                      title="Export a JSON report."
+                    >
+                      <Icon name="Download" size={16} className="text-[var(--amber)]" /> JSON
+                    </button>
+                    <button
+                      onClick={exportCsv}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--teal)] px-3 py-2 text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-200 inline-flex items-center gap-2"
+                      disabled={!stats}
+                      title="Export a CSV snapshot."
+                    >
+                      <Icon name="Download" size={16} className="text-[var(--teal)]" /> CSV
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <div className="bg-black border-2 border-[var(--line)] px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] sm:text-xs font-mono text-zinc-400 uppercase tracking-widest font-black">Units</span>
+                        <select
+                          className="focus-ring bg-transparent text-[var(--amber)] font-black text-xs sm:text-sm outline-none"
+                          value={units.distance}
+                          onChange={(e) => setUnits((u) => ({ ...u, distance: e.target.value }))}
+                        >
+                          <option value="mi" className="bg-black text-white">
+                            Miles
+                          </option>
+                          <option value="km" className="bg-black text-white">
+                            Kilometers
+                          </option>
+                        </select>
+                        <span className="text-zinc-700">|</span>
+                        <select
+                          className="focus-ring bg-transparent text-[var(--amber)] font-black text-xs sm:text-sm outline-none"
+                          value={units.fuelVolume}
+                          onChange={(e) => setUnits((u) => ({ ...u, fuelVolume: e.target.value }))}
+                        >
+                          <option value="gal" className="bg-black text-white">
+                            Gallons
+                          </option>
+                          <option value="L" className="bg-black text-white">
+                            Liters
+                          </option>
+                        </select>
+                        <span className="text-zinc-700">|</span>
+                        <select
+                          className="focus-ring bg-transparent text-[var(--amber)] font-black text-xs sm:text-sm outline-none"
+                          value={units.currency}
+                          onChange={(e) => setUnits((u) => ({ ...u, currency: e.target.value }))}
+                        >
+                          <option value="USD" className="bg-black text-white">
+                            USD
+                          </option>
+                          <option value="EUR" className="bg-black text-white">
+                            EUR
+                          </option>
+                          <option value="GBP" className="bg-black text-white">
+                            GBP
+                          </option>
+                          <option value="CAD" className="bg-black text-white">
+                            CAD
+                          </option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <label className="bg-black border-2 border-[var(--line)] px-3 py-2 inline-flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={roundTrip}
+                        onChange={(e) => setRoundTrip(e.target.checked)}
+                        className="accent-[var(--amber)]"
+                      />
+                      <span className="text-[10px] sm:text-xs font-mono text-zinc-300 uppercase tracking-widest font-black">
+                        Round trip
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              </header>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                {/* Left column */}
+                <div className="col-span-1 lg:col-span-7 space-y-6">
+                  <Section title={view === "simulate" ? "Vehicle Selection" : "Manual Engineering Input"} badge="SEC. A - CONFIGURATION" icon={view === "simulate" ? "Database" : "Plus"}>
+                    {view === "simulate" ? (
+                      <div className="space-y-6 sm:space-y-8 mt-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Model Year</RetroLabel>
+                            <div className="crt-screen border-2 border-[var(--line)] p-1 h-[52px]">
+                              <RetroSelect value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)}>
+                                {years.map((y) => (
+                                  <option key={y} value={y} className="bg-black text-white">
+                                    {y}
+                                  </option>
+                                ))}
+                              </RetroSelect>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Manufacturer</RetroLabel>
+                            <div className="crt-screen border-2 border-[var(--line)] p-1 h-[52px]">
+                              <RetroSelect
+                                value={selectedMake}
+                                onChange={(e) => setSelectedMake(e.target.value)}
+                                disabled={isLoading}
+                                className="truncate"
+                              >
+                                <option value="" className="bg-black text-white">
+                                  MAKE
+                                </option>
+                                {filteredMakes.map((m) => (
+                                  <option key={m} value={m} className="bg-black text-white">
+                                    {m}
+                                  </option>
+                                ))}
+                              </RetroSelect>
+                            </div>
+                            <div className="relative">
+                              <Icon name="Search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                              <input
+                                value={makeFilter}
+                                onChange={(e) => setMakeFilter(e.target.value)}
+                                placeholder="Filter makes..."
+                                className="focus-ring w-full bg-black border-2 border-[var(--line)] pl-9 pr-3 py-2 text-xs sm:text-sm font-black text-white outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Trim / Model</RetroLabel>
+                            <div className="crt-screen border-2 border-[var(--line)] p-1 h-[52px]">
+                              <RetroSelect
+                                value={selectedModel}
+                                onChange={(e) => setAndFetchVehicle(e.target.value)}
+                                disabled={!selectedMake || isLoading}
+                                className="truncate"
+                              >
+                                <option value="" className="bg-black text-white">
+                                  MODEL
+                                </option>
+                                {filteredModels.map((m) => (
+                                  <option key={m} value={m} className="bg-black text-white">
+                                    {m}
+                                  </option>
+                                ))}
+                              </RetroSelect>
+                            </div>
+                            <div className="relative">
+                              <Icon name="Search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                              <input
+                                value={modelFilter}
+                                onChange={(e) => setModelFilter(e.target.value)}
+                                placeholder="Filter models..."
+                                className="focus-ring w-full bg-black border-2 border-[var(--line)] pl-9 pr-3 py-2 text-xs sm:text-sm font-black text-white outline-none"
+                                disabled={!selectedMake}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {isLoading ? (
+                          <div className="flex flex-col items-center justify-center py-10 sm:py-16 gap-4">
+                            <div className="animate-spin text-[var(--amber)]">
+                              <Icon name="TrendingUp" size={48} />
+                            </div>
+                            <span className="text-[10px] sm:text-xs font-mono tracking-widest uppercase text-[var(--amber)] font-black text-center animate-pulse">
+                              QUERYING MAINFRAME...
+                            </span>
+                          </div>
+                        ) : null}
+
+                        {selectedVehicle && !isLoading ? (
+                          <VehicleCard
+                            vehicle={selectedVehicle}
+                            mode={inferModeFromFuelType(selectedVehicle.fuelType)}
+                            logoError={logoError}
+                            setLogoError={setLogoError}
+                          />
+                        ) : (
+                          <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-6 text-zinc-400">
+                            <div className="flex items-center gap-2">
+                              <Icon name="Info" size={18} className="text-zinc-500" />
+                              <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black">
+                                Select year, make, model to load a vehicle profile.
+                              </div>
+                            </div>
+                            {recent?.length ? (
+                              <div className="mt-4">
+                                <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500 mb-2">
+                                  Recent
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {recent.map((r) => (
+                                    <button
+                                      key={`${r.id}:${r.make}:${r.model}`}
+                                      onClick={() => {
+                                        setSelectedYear(String(r.year));
+                                        setSelectedMake(r.make);
+                                        setSelectedModel(r.model);
+                                        setTimeout(() => setAndFetchVehicle(r.model), 0);
+                                      }}
+                                      className="focus-ring bg-[var(--panel)] border-2 border-[var(--line)] hover:border-[var(--amber)] px-2 py-1 text-[10px] uppercase tracking-widest font-black text-white"
+                                    >
+                                      {r.year} {r.make} {r.model}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-6 sm:space-y-8 mt-2">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 bg-black p-4 sm:p-6 border-4 border-[var(--line)]">
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Vehicle Label</RetroLabel>
+                            <RetroInput
+                              placeholder="e.g. Bugatti Chiron"
+                              value={customVehicle.label}
+                              onChange={(e) => setCustomVehicle({ ...customVehicle, label: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Powertrain</RetroLabel>
+                            <select
+                              className="focus-ring w-full crt-screen p-3 sm:p-4 text-sm sm:text-base font-black outline-none border-2 border-[var(--line)] focus:border-[var(--amber)] text-white cursor-pointer appearance-none bg-black"
+                              value={customVehicle.mode}
+                              onChange={(e) => setCustomVehicle({ ...customVehicle, mode: e.target.value })}
+                            >
+                              <option value="ICE" className="bg-black">
+                                Internal Combustion (Gas)
+                              </option>
+                              <option value="Hybrid" className="bg-black">
+                                Hybrid (Use MPG)
+                              </option>
+                              <option value="EV" className="bg-black">
+                                Battery EV (Use mi/kWh)
+                              </option>
+                            </select>
+                          </div>
+
+                          {customVehicle.mode !== "EV" ? (
+                            <div className="space-y-2 flex flex-col min-w-0">
+                              <RetroLabel>MPG (combined)</RetroLabel>
+                              <RetroInput
+                                inputMode="decimal"
+                                value={customVehicle.mpg}
+                                onChange={(e) => setCustomVehicle({ ...customVehicle, mpg: e.target.value.replace(/[^0-9.]/g, "") })}
+                                placeholder="25"
+                              />
+                            </div>
+                          ) : (
+                            <div className="space-y-2 flex flex-col min-w-0">
+                              <RetroLabel>mi / kWh</RetroLabel>
+                              <RetroInput
+                                inputMode="decimal"
+                                value={customVehicle.miPerKWh}
+                                onChange={(e) =>
+                                  setCustomVehicle({ ...customVehicle, miPerKWh: e.target.value.replace(/[^0-9.]/g, "") })
+                                }
+                                placeholder="3.2"
+                              />
+                            </div>
+                          )}
+
+                          <div className="space-y-2 flex flex-col min-w-0">
+                            <RetroLabel>Hint</RetroLabel>
+                            <div className="bg-[var(--panel)] border-2 border-[var(--line)] p-3 text-xs sm:text-sm text-zinc-300 font-bold">
+                              {customVehicle.mode === "EV" ? (
+                                <div>
+                                  Use your real efficiency (mi/kWh). We’ll price energy with electricity rate + estimate CO2 using grid intensity.
+                                </div>
+                              ) : (
+                                <div>
+                                  Enter a realistic combined MPG. If you’re unsure, try 25 for average gas, 35 for efficient sedan, 15 for truck/SUV.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </Section>
+
+                  <Section title="Parameters" badge="SEC. B - PARAMETERS" icon="Activity">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8 h-full mt-4">
+                      <div className="flex flex-col h-full space-y-2 min-w-0">
+                        <div className="flex items-center gap-2 text-white bg-[var(--line)] p-2 inline-flex self-start border-l-4 border-[var(--amber)]">
+                          <Icon name="MapPin" size={16} className="text-[var(--amber)]" />
+                          <span className="text-[10px] sm:text-xs font-black uppercase tracking-widest text-white whitespace-nowrap">Origin LOC</span>
+                        </div>
+                        <div className="relative flex-1 flex flex-col justify-end crt-screen border-2 border-[var(--line)]">
+                          <input
+                            className="focus-ring w-full min-w-0 bg-transparent p-3 sm:p-4 text-sm sm:text-base font-black outline-none uppercase text-[var(--amber)] pr-12"
+                            value={locationLabel}
+                            onChange={(e) => setLocationLabel(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col h-full space-y-2 min-w-0">
+                        <div className="flex items-center gap-2 text-white bg-[var(--line)] p-2 inline-flex self-start border-l-4 border-[var(--amber)]">
+                          <Icon name="DollarSign" size={16} className="text-[var(--amber)]" />
+                          <span className="text-[10px] sm:text-xs font-black uppercase tracking-widest text-white whitespace-nowrap">
+                            Fuel Index
+                          </span>
+                        </div>
+                        <div className="relative flex-1 flex flex-col justify-end crt-screen border-2 border-[var(--line)]">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            className="focus-ring w-full min-w-0 bg-transparent p-3 sm:p-4 text-sm sm:text-base font-black outline-none text-[var(--amber)] pr-14"
+                            value={gasPriceInput}
+                            onChange={(e) => setGasPriceInput(e.target.value.replace(/[^0-9.]/g, ""))}
+                          />
+                          <span className="absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 text-[10px] sm:text-xs text-white font-black tracking-widest pointer-events-none">
+                            /GAL
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col h-full space-y-2 min-w-0">
+                        <div className="flex items-center gap-2 text-white bg-[var(--line)] p-2 inline-flex self-start border-l-4 border-[var(--amber)]">
+                          <Icon name="Activity" size={16} className="text-[var(--amber)]" />
+                          <span className="text-[10px] sm:text-xs font-black uppercase tracking-widest text-white whitespace-nowrap">
+                            Target RNG
+                          </span>
+                        </div>
+                        <div className="relative flex-1 flex flex-col justify-end crt-screen border-2 border-[var(--line)]">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            className="focus-ring w-full min-w-0 bg-transparent p-3 sm:p-4 text-sm sm:text-base font-black outline-none text-[var(--amber)] pr-12"
+                            value={distanceInput}
+                            onChange={(e) => setDistanceInput(e.target.value.replace(/[^0-9.]/g, ""))}
+                          />
+                          <span className="absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 text-[10px] sm:text-xs text-white font-black tracking-widest pointer-events-none">
+                            {units.distance.toUpperCase()}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* EV economics */}
+                    <div className="mt-8 bg-black border-4 border-[var(--line)] p-4 sm:p-6">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-3">
+                          <Icon name="Globe" size={20} className="text-[var(--amber)]" />
+                          <div className="text-xs sm:text-sm font-black uppercase tracking-widest text-white">Electric / Grid Overrides</div>
+                        </div>
+                        <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                          Used for EV cost + emissions
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mt-4">
+                        <div className="space-y-2">
+                          <RetroLabel>Electricity Rate ($/kWh)</RetroLabel>
+                          <RetroInput
+                            inputMode="decimal"
+                            value={electricityPriceInput}
+                            onChange={(e) => setElectricityPriceInput(e.target.value.replace(/[^0-9.]/g, ""))}
+                            placeholder="0.15"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <RetroLabel>Grid Intensity (gCO2/kWh)</RetroLabel>
+                          <RetroInput
+                            inputMode="decimal"
+                            value={gridIntensityInput}
+                            onChange={(e) => setGridIntensityInput(e.target.value.replace(/[^0-9.]/g, ""))}
+                            placeholder="400"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </Section>
+
+                  <Section title="Eco Coach & Trip Planner" badge="SEC. B2 - CARBON OPS" icon="Leaf">
+                    <div className="space-y-6 mt-2">
+                      <div className="bg-black border-2 border-[var(--line)] p-4 sm:p-5">
+                        <div className="flex items-center gap-2 mb-3">
+                          <Icon name="Info" size={18} className="text-[var(--teal)] shrink-0" />
+                          <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-400">
+                            Personalized suggestions (general guidance—not a replacement for your owner's manual or safe driving).
+                          </span>
+                        </div>
+                        {stats ? (
+                          <ul className="list-disc pl-5 space-y-2 text-xs sm:text-sm text-zinc-200 font-bold leading-relaxed">
+                            {ecoTips.map((t, i) => (
+                              <li key={i} className="marker:text-[var(--amber)]">
+                                {t}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                            Configure a vehicle and distance above to unlock tailored eco tips.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-6 space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                          <div className="flex items-center gap-3 text-white min-w-0">
+                            <Icon name="MapPin" size={22} className="text-[var(--amber)] shrink-0" />
+                            <div>
+                              <div className="text-xs sm:text-sm font-black uppercase tracking-widest">Fuel-smart route compare</div>
+                              <div className="text-[10px] sm:text-xs font-mono text-zinc-500 uppercase tracking-widest font-bold mt-1">
+                                Geocode (Photon) + driving geometry (OSRM demo). We rank by shortest distance as a practical proxy for minimum fuel/energy for the same vehicle.
+                              </div>
+                            </div>
+                          </div>
+                          <a
+                            className="focus-ring shrink-0 text-[10px] sm:text-xs font-black uppercase tracking-widest text-[var(--sky)] border border-[var(--line)] px-3 py-2 hover:border-[var(--amber)]"
+                            href={
+                              routeFromInput && routeToInput
+                                ? `https://www.google.com/maps/dir/${encodeURIComponent(routeFromInput)}/${encodeURIComponent(routeToInput)}`
+                                : "https://www.google.com/maps"
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open in Maps
+                          </a>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <RetroLabel>Start</RetroLabel>
+                            <RetroInput
+                              placeholder="e.g. 1 Apple Park Way, Cupertino CA"
+                              value={routeFromInput}
+                              onChange={(e) => setRouteFromInput(e.target.value)}
+                              disabled={routeLoading}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <RetroLabel>Destination</RetroLabel>
+                            <RetroInput
+                              placeholder="e.g. Stanford University, CA"
+                              value={routeToInput}
+                              onChange={(e) => setRouteToInput(e.target.value)}
+                              disabled={routeLoading}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={runRoutePlanner}
+                            disabled={routeLoading}
+                            className={
+                              "focus-ring px-4 py-3 text-xs font-black uppercase tracking-widest border-2 " +
+                              (routeLoading
+                                ? "bg-[var(--panel)] text-zinc-600 border-[var(--line)] cursor-wait"
+                                : "bg-[var(--amber)] text-black border-[var(--amber)] hover:bg-white")
+                            }
+                          >
+                            {routeLoading ? "Routing + Syncing Map…" : "Compare routes + Map"}
+                          </button>
+                          {routeResults.length ? (
+                            <button
+                              type="button"
+                              onClick={applyBestRouteDistance}
+                              className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--teal)] px-4 py-3 text-xs font-black uppercase tracking-widest text-zinc-200"
+                              title="Copy shortest-route miles into Target RNG (one-way leg)"
+                            >
+                              Use shortest distance in Target RNG
+                            </button>
+                          ) : null}
+                        </div>
+
+                        {routeError ? (
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-[var(--red)] border border-[var(--red)]/40 p-3">
+                            {routeError}
+                          </div>
+                        ) : null}
+
+                        {/* Live Map — always in DOM so Leaflet initialises; revealed after first route */}
+                        <div
+                          className="crt-screen border-4 border-[var(--line)] overflow-hidden relative mt-4"
+                          style={{
+                            display: routeGeodata.length ? "block" : "none",
+                          }}
+                        >
+                          <div className="absolute top-2 left-2 z-[1000] flex gap-2 flex-wrap pointer-events-none">
+                            <span className="bg-black/80 border border-[var(--amber)] text-[var(--amber)] text-[9px] font-mono font-black uppercase tracking-widest px-2 py-1">
+                              NAV_MATRIX // OSRM
+                            </span>
+                            {routeGeodata.length > 1 && (
+                              <span className="bg-black/80 border border-[var(--line)] text-zinc-400 text-[9px] font-mono font-black uppercase tracking-widest px-2 py-1">
+                                <span style={{color:"#22c55e"}}>━</span> SHORTEST &nbsp;<span style={{color:"#60a5fa"}}>╌</span> ALT
+                              </span>
+                            )}
+                          </div>
+                          <div id="am-map" ref={mapRef} style={{ height: 380 }}></div>
+                        </div>
+
+                        {routeEndpoints ? (
+                          <div className="text-[10px] sm:text-xs font-mono text-zinc-400 uppercase tracking-widest font-bold">
+                            Resolved: <span className="text-white">{routeEndpoints.from}</span>
+                            {" → "}
+                            <span className="text-white">{routeEndpoints.to}</span>
+                          </div>
+                        ) : null}
+
+                        {routeResults.length ? (
+                          <div className="space-y-3">
+                            {routeResults.map((r) => (
+                              <div
+                                key={r.key}
+                                className={
+                                  "border-2 p-4 " +
+                                  (r.isBestDistance
+                                    ? "border-[var(--amber)] bg-[var(--amber)]/10 shadow-[0_0_12px_rgba(34,197,94,0.25)]"
+                                    : "border-[var(--line)] bg-[var(--panel)]")
+                                }
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="text-sm font-black text-white uppercase tracking-widest">{r.label}</div>
+                                  {r.isBestDistance ? (
+                                    <span className="text-[10px] font-mono uppercase tracking-widest font-black text-black bg-[var(--amber)] px-2 py-1">
+                                      Fewest miles
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[10px] sm:text-xs font-mono font-bold text-zinc-400 uppercase tracking-widest">
+                                  <div>
+                                    Distance:{" "}
+                                    <span className="text-white">
+                                      {formatNumber(units.distance === "km" ? r.distMi / MI_PER_KM : r.distMi, 1)} {units.distance.toUpperCase()}
+                                    </span>{" "}
+                                    <span className="text-zinc-600 normal-case">(~{formatNumber(r.distMi, 1)} mi)</span>
+                                  </div>
+                                  <div>
+                                    Drive time (map):{" "}
+                                    <span className="text-white">
+                                      {Math.floor(r.durationS / 3600)
+                                        ? `${Math.floor(r.durationS / 3600)}h `
+                                        : ""}
+                                      {Math.floor((r.durationS % 3600) / 60)}m
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                  <div className="bg-black border border-[var(--line)] p-2">
+                                    <div className="text-[10px] text-zinc-500 uppercase font-black">CO₂ (one-way)</div>
+                                    <div className="text-sm font-black text-[var(--amber)]">{formatNumber(r.est.totalCO2_kg, 2)} kg</div>
+                                  </div>
+                                  <div className="bg-black border border-[var(--line)] p-2">
+                                    <div className="text-[10px] text-zinc-500 uppercase font-black">Cost (one-way)</div>
+                                    <div className="text-sm font-black text-[var(--teal)]">{formatMoney(r.est.totalCost, units.currency)}</div>
+                                  </div>
+                                  <div className="bg-black border border-[var(--line)] p-2">
+                                    <div className="text-[10px] text-zinc-500 uppercase font-black">
+                                      {activeMode === "EV" ? "Energy" : "Fuel"}
+                                    </div>
+                                    <div className="text-sm font-black text-white">
+                                      {activeMode === "EV"
+                                        ? `${formatNumber(r.est.kwh, 2)} kWh`
+                                        : `${formatNumber(r.est.fuelDisplay, 2)} ${r.est.fuelUnit}`}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+
+                            {routeResults.length > 1 ? (
+                              <div className="text-[10px] sm:text-xs font-mono text-zinc-500 uppercase tracking-widest font-bold leading-relaxed border-t border-[var(--line)] pt-3">
+                                Versus longest option here: save ~{" "}
+                                <span className="text-[var(--teal)]">
+                                  {formatNumber(
+                                    routeResults[routeResults.length - 1].est.totalCO2_kg - routeResults[0].est.totalCO2_kg,
+                                    2
+                                  )}{" "}
+                                  kg CO₂
+                                </span>{" "}
+                                and{" "}
+                                <span className="text-[var(--teal)]">
+                                  {formatMoney(
+                                    routeResults[routeResults.length - 1].est.totalCost - routeResults[0].est.totalCost,
+                                    units.currency
+                                  )}
+                                </span>{" "}
+                                on this one-way leg (same vehicle + prices as above). Traffic and driving style still dominate in the real world.
+                              </div>
+                            ) : (
+                              <div className="text-[10px] sm:text-xs font-mono text-zinc-500 uppercase tracking-widest font-bold">
+                                Only one drivable variant was returned—try nearby side streets or a different destination pin if your maps app shows a shorter path.
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </Section>
+
+                  {/* Presets */}
+                  <Section title="Presets" badge="SEC. E - MEMORY BANK" icon="Database">
+                    {presets?.length ? (
+                      <div className="space-y-3">
+                        <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                          Saved locally in your browser
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {presets.map((p) => (
+                            <div key={p.id} className="bg-black border-2 border-[var(--line)] p-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-black text-white truncate">{p.name}</div>
+                                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest font-bold mt-1">
+                                    {new Date(p.createdAt).toLocaleString()}
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => deletePreset(p.id)}
+                                  className="focus-ring bg-[var(--panel)] border-2 border-[var(--line)] hover:border-[var(--red)] p-2 shrink-0"
+                                  title="Delete preset"
+                                >
+                                  <Icon name="X" size={16} className="text-[var(--red)]" />
+                                </button>
+                              </div>
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  onClick={() => loadPreset(p)}
+                                  className="focus-ring flex-1 bg-[var(--amber)] text-black font-black uppercase tracking-widest text-xs py-2 border-2 border-[var(--amber)] hover:bg-white"
+                                >
+                                  Load
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-6 text-zinc-400">
+                        <div className="flex items-center gap-2">
+                          <Icon name="Info" size={18} className="text-zinc-500" />
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black">
+                            No presets yet. Configure a vehicle and click “Save Preset”.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </Section>
+                </div>
+
+                {/* Right column */}
+                <div className="col-span-1 lg:col-span-5 space-y-6">
+                  {/* Telemetry */}
+                  <div className="bg-[var(--panel)] border-t-8 border-[var(--line)] border-x-2 border-b-2 p-6 sm:p-10 relative overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.8)]">
+                    <div className="absolute top-0 right-0 bg-[var(--line)] text-zinc-400 font-mono text-[10px] px-3 py-1 font-bold z-20">
+                      SEC. C - TELEMETRY
+                    </div>
+
+                    <div className="flex items-center gap-3 text-[var(--amber)] mb-6 sm:mb-8 border-b-2 border-[var(--line)] pb-2">
+                      <Icon name="Globe" size={26} className="shrink-0" />
+                      <h3 className="text-lg sm:text-xl md:text-2xl font-black uppercase tracking-widest text-white italic leading-tight">
+                        Carbon & Cost Telemetry
+                      </h3>
+                    </div>
+
+                    {stats ? (
+                      <>
+                        <div className="crt-screen p-4 sm:p-8 border-4 border-[var(--line)] flex flex-col items-center justify-center text-center relative overflow-hidden mb-6 w-full [container-type:inline-size]">
+                          <div className="absolute top-2 left-2 text-[10px] text-[var(--amber)] font-mono whitespace-nowrap">
+                            CO2_OUTPUT
+                          </div>
+                          <div className="flex items-baseline justify-center mt-6 sm:mt-4 w-full px-2">
+                            <span className="font-black tracking-tighter leading-none text-[var(--amber)] drop-shadow-[0_0_15px_rgba(245,158,11,0.8)] font-mono text-[clamp(2.5rem,15cqi,6rem)] pr-1 sm:pr-2 whitespace-nowrap">
+                              {formatNumber(stats.totalCO2_kg, 2)}
+                            </span>
+                            <span className="text-[clamp(1rem,6cqi,2.5rem)] font-black text-white italic shrink-0 whitespace-nowrap">
+                              KG
+                            </span>
+                          </div>
+                          <div className="mt-4 text-[10px] sm:text-xs uppercase tracking-widest font-mono font-black text-zinc-400">
+                            Distance:{" "}
+                            <span className="text-white">{formatNumber(stats.distanceDisplay, 2)}</span>{" "}
+                            {stats.distanceUnit.toUpperCase()}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 mt-6">
+                          <div className="bg-[var(--line)] p-3 sm:p-4 border-b-4 border-r-4 border-black min-w-0 flex flex-col justify-center w-full [container-type:inline-size]">
+                            <div className="text-[clamp(0.6rem,4cqi,0.85rem)] text-zinc-300 uppercase font-black tracking-widest mb-1 sm:mb-2 drop-shadow-md leading-tight break-words">
+                              Financial Drain
+                            </div>
+                            <div className="text-[clamp(1.3rem,10cqi,2.5rem)] font-black text-[var(--teal)] font-mono leading-none drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] break-all mt-1">
+                              {formatMoney(stats.totalCost, units.currency)}
+                            </div>
+                          </div>
+                          <div className="bg-[var(--line)] p-3 sm:p-4 border-b-4 border-r-4 border-black min-w-0 flex flex-col justify-center w-full [container-type:inline-size]">
+                            <div className="text-[clamp(0.6rem,4cqi,0.85rem)] text-zinc-300 uppercase font-black tracking-widest mb-1 sm:mb-2 drop-shadow-md leading-tight break-words">
+                              Resource Mass
+                            </div>
+                            <div className="text-[clamp(1.2rem,9cqi,2.2rem)] font-black text-white font-mono leading-none drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] flex items-baseline break-all mt-1">
+                              {activeMode === "EV" ? (
+                                <>
+                                  <span>{formatNumber(stats.kwh, 2)}</span>
+                                  <span className="text-[0.4em] ml-2 opacity-60 italic font-sans shrink-0">kWh</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span>{formatNumber(stats.fuelDisplay, 2)}</span>
+                                  <span className="text-[0.4em] ml-2 opacity-60 italic font-sans shrink-0">
+                                    {stats.fuelUnit}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-6 bg-black border-2 border-[var(--line)] p-4">
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                            Benchmarks (same distance)
+                          </div>
+                          <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <BenchItem label="Truck" value={`${formatNumber(stats.benchmarks.truckCO2_kg, 1)} kg`} color="text-[var(--red)]" />
+                            <BenchItem label="Sedan" value={`${formatNumber(stats.benchmarks.sedanCO2_kg, 1)} kg`} color="text-[var(--teal)]" />
+                            <BenchItem label="Hybrid" value={`${formatNumber(stats.benchmarks.hybridCO2_kg, 1)} kg`} color="text-[var(--blue)]" />
+                          </div>
+                          <div className="mt-4 text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-400">
+                            Savings vs Truck:{" "}
+                            <span className="text-black bg-[var(--teal)] px-2 py-1 shadow-[0_0_10px_var(--teal)]">
+                              +{formatNumber(stats.co2VsTruck_kg, 2)} kg
+                            </span>
+                          </div>
+                          <div className="mt-3 text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                            Intensity:{" "}
+                            <span className="text-white">{formatNumber(stats.co2PerMile_kg * 1000, 0)}</span> gCO2/mi •{" "}
+                            <span className="text-white">{formatMoney(stats.costPerMile, units.currency)}</span>/mi
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="py-16 sm:py-24 flex flex-col items-center justify-center text-white text-center space-y-4 crt-screen border-4 border-[var(--line)]">
+                        <Icon name="Info" size={48} className="text-zinc-600" />
+                        <p className="text-[10px] sm:text-xs uppercase tracking-widest font-mono font-black px-4 text-zinc-500 animate-pulse">
+                          AWAITING_INPUT_SEQ...
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Compare list */}
+                  <Section title="Compare" badge="SEC. F - MULTI-SCAN" icon="TrendingUp">
+                    {compareStats?.length ? (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                            Up to 4 vehicles
+                          </div>
+                          <button
+                            onClick={clearCompare}
+                            className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--red)] px-2 py-1 text-[10px] uppercase tracking-widest font-black text-white"
+                          >
+                            Clear
+                          </button>
+                        </div>
+
+                        <div className="space-y-3">
+                          {compareStats.map((c) => (
+                            <div key={c.key} className="bg-black border-2 border-[var(--line)] p-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-black text-white truncate">{c.label}</div>
+                                  <div className="mt-1 text-[10px] font-mono uppercase tracking-widest font-black text-zinc-500">
+                                    {c.mode}
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => removeCompare(c.key)}
+                                  className="focus-ring bg-[var(--panel)] border-2 border-[var(--line)] hover:border-[var(--red)] p-2 shrink-0"
+                                  title="Remove"
+                                >
+                                  <Icon name="X" size={16} className="text-[var(--red)]" />
+                                </button>
+                              </div>
+
+                              <div className="mt-3 grid grid-cols-2 gap-3">
+                                <MetricMini label="CO2 (kg)" value={formatNumber(c.stats.totalCO2_kg, 2)} accent="text-[var(--amber)]" />
+                                <MetricMini label="Cost" value={formatMoney(c.stats.totalCost, units.currency)} accent="text-[var(--teal)]" />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-6 text-zinc-400">
+                        <div className="flex items-center gap-2">
+                          <Icon name="Info" size={18} className="text-zinc-500" />
+                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black">
+                            Add vehicles via “Add to Compare”.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </Section>
+
+                  {/* Terminal */}
+                  <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-8 font-mono text-[10px] sm:text-xs md:text-sm text-[var(--amber)] space-y-4 shadow-[inset_0_0_20px_rgba(0,0,0,1)] relative">
+                    <div className="absolute top-0 right-0 w-full h-full bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[length:100%_4px] pointer-events-none z-0"></div>
+                    <div className="relative z-10">
+                      <div className="flex items-center gap-2 sm:gap-3 text-white mb-4 sm:mb-6 font-black uppercase tracking-widest text-[10px] sm:text-sm border-b border-zinc-800 pb-2">
+                        <Icon name="Terminal" size={18} className="shrink-0" />
+                        <span>DIAGNOSTICS_LOG</span>
+                      </div>
+                      <div className="space-y-2 sm:space-y-3 opacity-90 leading-relaxed font-bold break-words w-full overflow-hidden">
+                        <p className="truncate text-white">{`>> SYS_BOOT [${new Date().toISOString().split("T")[1].split(".")[0]}]`}</p>
+                        <p className="truncate text-white">{`>> LOC: ${String(locationLabel).toUpperCase()}`}</p>
+                        <p className="truncate">{`>> API_STATUS: ${api.status.ok ? "CONNECTED" : "DEGRADED"} (${api.status.message})`}</p>
+                        <p className="truncate">{`>> NAV_MATRIX: ${routeGeodata.length ? `ACTIVE // ${routeGeodata.length} ROUTE(S) RENDERED` : "STANDBY"}`}</p>
+                        {stats ? (
+                          <p className="text-black bg-[var(--teal)] py-1 px-2 inline-block mt-2 shadow-[0_0_10px_var(--teal)] font-black break-words max-w-full overflow-hidden text-ellipsis">
+                            {`>> SAVING: +${formatNumber(stats.co2VsTruck_kg, 2)}KG vs TRUCK`}
+                          </p>
+                        ) : null}
+                        <p className="animate-pulse text-white mt-4 font-black">{`>> LISTENING_FOR_OVERRIDE_KEY...`}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Report button */}
+                  <button
+                    onClick={generateReport}
+                    disabled={!stats}
+                    className={
+                      "focus-ring w-full font-black py-5 sm:py-8 px-2 uppercase tracking-widest sm:tracking-[0.3em] text-xs sm:text-sm md:text-lg transition-all flex items-center justify-center gap-3 sm:gap-6 group italic border-t border-l border-b-8 border-r-8 " +
+                      (stats
+                        ? "bg-[var(--amber)] text-black border-t-white/50 border-l-white/50 border-b-[var(--amber2)] border-r-[var(--amber2)] hover:bg-white hover:border-b-zinc-400 hover:border-r-zinc-400 active:border-b-0 active:border-r-0 active:translate-y-2 active:translate-x-2 cursor-pointer shadow-[8px_8px_0px_#000]"
+                        : "bg-[var(--panel)] text-zinc-600 border-[var(--line)] cursor-not-allowed")
+                    }
+                  >
+                    <div className={stats ? "group-hover:rotate-45 transition-transform shrink-0" : "shrink-0"}>
+                      <Icon name="Gauge" size={24} />
+                    </div>
+                    <span className="truncate">INITIALIZE REPORT</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Report */}
+              {showReport && stats ? (
+                <div
+                  ref={reportRef}
+                  className="mt-16 sm:mt-24 animate-in fade-in slide-in-from-top-8 duration-700 bg-[var(--panel)] border-4 sm:border-8 border-[var(--line)] p-4 sm:p-10 shadow-[0_20px_50px_rgba(0,0,0,1)] relative"
+                >
+                  <div className="absolute top-0 right-0 bg-[var(--line)] text-zinc-400 font-mono text-[8px] sm:text-[10px] px-2 sm:px-3 py-1 font-bold z-10 hidden sm:block">
+                    SEC. D - PRINT OUT
+                  </div>
+
+                  <div className="mb-10 sm:mb-16 text-center border-b-4 border-[var(--line)] pb-8 sm:pb-10">
+                    <h2 className="text-3xl sm:text-5xl md:text-6xl font-black uppercase tracking-tighter italic text-white mb-4 drop-shadow-[2px_2px_0px_var(--amber)] break-words">
+                      Impact <span className="text-[var(--amber)]">Graphs</span>
+                    </h2>
+                    <p className="text-xs sm:text-sm md:text-base font-mono text-zinc-400 tracking-widest uppercase font-bold break-words px-2">
+                      Telemetry readouts for{" "}
+                      <span className="text-white bg-[var(--line)] px-2 mt-2 sm:mt-0 inline-block leading-loose">
+                        {view === "custom"
+                          ? customVehicle.label
+                          : `${selectedVehicle?.year ?? ""} ${selectedVehicle?.make ?? ""} ${selectedVehicle?.model ?? ""}`.trim()}
+                      </span>
+                    </p>
+                    <p className="mt-4 text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                      Hover graphs to inspect at distance. Curves assume constant efficiency.
+                    </p>
+                  </div>
+
+                  {/* Summary cards */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+                    <SummaryCard title="CO2 Total" value={`${formatNumber(stats.totalCO2_kg, 2)} kg`} accent="text-[var(--amber)]" />
+                    <SummaryCard title="Cost Total" value={formatMoney(stats.totalCost, units.currency)} accent="text-[var(--teal)]" />
+                    <SummaryCard
+                      title={activeMode === "EV" ? "Energy" : "Fuel"}
+                      value={
+                        activeMode === "EV"
+                          ? `${formatNumber(stats.kwh, 2)} kWh`
+                          : `${formatNumber(stats.fuelDisplay, 2)} ${stats.fuelUnit}`
+                      }
+                      accent="text-white"
+                    />
+                  </div>
+
+                  {/* Vehicle model */}
+                  <div className="mt-10 bg-black border-4 border-[var(--line)] p-4 sm:p-8">
+                    <div className="flex items-center justify-between gap-3 flex-wrap border-b-2 border-zinc-800 pb-4">
+                      <div className="flex items-center gap-3 text-white">
+                        <Icon name="Car" size={24} className="text-[var(--amber)] shrink-0" />
+                        <h3 className="text-sm sm:text-lg md:text-xl font-black uppercase tracking-widest text-white leading-tight">
+                          Vehicle Model (Stylized)
+                        </h3>
+                      </div>
+                      <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-400">
+                        {activeMode} • graph scale: {formatNumber(maxGraphDisplay, 0)} {graphUnitLabel}
+                      </div>
+                    </div>
+
+                    <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6 items-stretch">
+                      <div className="lg:col-span-2">
+                        <EcoCarModel
+                          label={
+                            view === "custom"
+                              ? customVehicle.label
+                              : `${selectedVehicle?.year ?? ""} ${selectedVehicle?.make ?? ""} ${selectedVehicle?.model ?? ""}`.trim()
+                          }
+                          mode={activeMode}
+                          make={selectedVehicle?.make || ""}
+                          year={selectedVehicle?.year || ""}
+                          model={selectedVehicle?.model || ""}
+                        />
+                      </div>
+                      <div className="bg-[var(--panel)] border-2 border-[var(--line)] p-4">
+                        <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                          Useful metrics (per mile)
+                        </div>
+                        <div className="mt-4 space-y-3">
+                          <KeyValue k="CO2 intensity" v={`${formatNumber(stats.co2PerMile_kg * 1000, 0)} gCO2/mi`} accent="text-[var(--amber)]" />
+                          <KeyValue k="Cost intensity" v={`${formatMoney(stats.costPerMile, units.currency)}/mi`} accent="text-[var(--teal)]" />
+                          {activeMode === "EV" ? (
+                            <KeyValue k="Energy intensity" v={`${formatNumber(stats.kwhPerMile, 3)} kWh/mi`} accent="text-white" />
+                          ) : (
+                            <KeyValue k="Fuel intensity" v={`${formatNumber(stats.fuelGalPerMile, 3)} gal/mi`} accent="text-white" />
+                          )}
+                          <div className="pt-3 border-t border-zinc-800 text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                            Tip: “per mile” stays useful as you change distance.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Graphs */}
+                  <div className="mt-10 grid grid-cols-1 lg:grid-cols-2 gap-8 sm:gap-12">
+                    <LineGraph
+                      title="Emissions vs Distance (kg CO2)"
+                      accent="var(--amber)"
+                      maxXDisplay={maxGraphDisplay}
+                      xUnit={graphUnitLabel}
+                      onHover={handleGraphHover}
+                      onLeave={clearGraphHover}
+                      hoverDistMi={hoverDistMi}
+                      maxXMi={MAX_GRAPH_MI}
+                      lines={[
+                        { label: "Target", color: "var(--amber)", yAtMax: stats.co2PerMile_kg * MAX_GRAPH_MI },
+                        { label: "Hybrid (benchmark)", color: "var(--blue)", dashed: true, yAtMax: (200 / 1000) * MAX_GRAPH_MI },
+                        { label: "Sedan (benchmark)", color: "var(--teal)", dashed: true, yAtMax: (411 / 1000) * MAX_GRAPH_MI },
+                        { label: "Truck (benchmark)", color: "var(--red)", dashed: true, yAtMax: (550 / 1000) * MAX_GRAPH_MI },
+                      ]}
+                      tooltip={{
+                        render: (dMi) => {
+                          const dDisplay = units.distance === "km" ? dMi / MI_PER_KM : dMi;
+                          const target = stats.co2PerMile_kg * dMi;
+                          return {
+                            title: `AT ${formatNumber(dDisplay, 1)} ${graphUnitLabel}`,
+                            rows: [
+                              { label: "TARGET", value: `${formatNumber(target, 1)} kg`, color: "var(--amber)", strong: true },
+                              { label: "TRUCK", value: `${formatNumber((550 / 1000) * dMi, 1)} kg`, color: "var(--red)" },
+                              { label: "SEDAN", value: `${formatNumber((411 / 1000) * dMi, 1)} kg`, color: "var(--teal)" },
+                              { label: "HYBRID", value: `${formatNumber((200 / 1000) * dMi, 1)} kg`, color: "var(--blue)" },
+                            ],
+                          };
+                        },
+                      }}
+                    />
+
+                    <LineGraph
+                      title="Cost vs Distance"
+                      accent="var(--teal)"
+                      maxXDisplay={maxGraphDisplay}
+                      xUnit={graphUnitLabel}
+                      onHover={handleGraphHover}
+                      onLeave={clearGraphHover}
+                      hoverDistMi={hoverDistMi}
+                      maxXMi={MAX_GRAPH_MI}
+                      money
+                      currency={units.currency}
+                      lines={[
+                        { label: "Target", color: activeMode === "EV" ? "var(--sky)" : "#ffffff", yAtMax: stats.costPerMile * MAX_GRAPH_MI },
+                        { label: "Avg Gas (25 MPG)", color: "var(--teal)", dashed: true, yAtMax: stats.benchmarks.avgGasCostPerMile * MAX_GRAPH_MI },
+                      ]}
+                      tooltip={{
+                        render: (dMi) => {
+                          const dDisplay = units.distance === "km" ? dMi / MI_PER_KM : dMi;
+                          const target = stats.costPerMile * dMi;
+                          const avg = stats.benchmarks.avgGasCostPerMile * dMi;
+                          return {
+                            title: `AT ${formatNumber(dDisplay, 1)} ${graphUnitLabel}`,
+                            rows: [
+                              {
+                                label: "TARGET",
+                                value: formatMoney(target, units.currency),
+                                color: activeMode === "EV" ? "var(--sky)" : "#ffffff",
+                                strong: true,
+                              },
+                              { label: "AVG GAS", value: formatMoney(avg, units.currency), color: "var(--teal)" },
+                            ],
+                          };
+                        },
+                      }}
+                    />
+
+                    <BarCompare
+                      title="Annual footprint (metric tons)"
+                      subtitle="250 commute-days baseline"
+                      items={[
+                        { label: "Target", color: "var(--amber)", value: (stats.totalCO2_kg * 250) / 1000 },
+                        { label: "Sedan", color: "var(--teal)", value: (stats.benchmarks.sedanCO2_kg * 250) / 1000 },
+                        { label: "Truck", color: "var(--red)", value: (stats.benchmarks.truckCO2_kg * 250) / 1000 },
+                      ]}
+                    />
+
+                    <BarCompare
+                      title={`Cost per 100 ${graphUnitLabel}`}
+                      subtitle="Normalized running cost"
+                      money
+                      currency={units.currency}
+                      items={[
+                        { label: "Target", color: activeMode === "EV" ? "var(--sky)" : "#ffffff", value: stats.costPerMile * 100 },
+                        { label: "Avg Gas (25 MPG)", color: "var(--teal)", value: stats.benchmarks.avgGasCostPerMile * 100 },
+                      ]}
+                    />
+                  </div>
+
+                  {/* Compare table (if any) */}
+                  {compareStats?.length ? (
+                    <div className="mt-10 bg-black border-4 border-[var(--line)] p-4 sm:p-8">
+                      <div className="flex items-center gap-3 mb-6 text-white border-b-2 border-zinc-800 pb-4">
+                        <Icon name="BarChart" size={24} className="text-[var(--amber)] shrink-0" />
+                        <h3 className="text-sm sm:text-lg md:text-xl font-black uppercase tracking-widest text-white leading-tight">
+                          Compare Snapshot
+                        </h3>
+                      </div>
+                      <div className="overflow-auto">
+                        <table className="w-full text-left text-xs sm:text-sm">
+                          <thead className="text-zinc-400 uppercase tracking-widest text-[10px] sm:text-xs font-black">
+                            <tr>
+                              <th className="py-2 pr-3">Vehicle</th>
+                              <th className="py-2 pr-3">Mode</th>
+                              <th className="py-2 pr-3">CO2 (kg)</th>
+                              <th className="py-2 pr-3">Cost</th>
+                              <th className="py-2 pr-3">Resource</th>
+                            </tr>
+                          </thead>
+                          <tbody className="text-white font-bold">
+                            {compareStats.map((c) => (
+                              <tr key={c.key} className="border-t border-zinc-800">
+                                <td className="py-2 pr-3 whitespace-nowrap">{c.label}</td>
+                                <td className="py-2 pr-3">{c.mode}</td>
+                                <td className="py-2 pr-3 text-[var(--amber)] font-black">{formatNumber(c.stats.totalCO2_kg, 2)}</td>
+                                <td className="py-2 pr-3 text-[var(--teal)] font-black">{formatMoney(c.stats.totalCost, units.currency)}</td>
+                                <td className="py-2 pr-3">
+                                  {c.mode === "EV"
+                                    ? `${formatNumber(c.stats.kwh, 2)} kWh`
+                                    : `${formatNumber(c.stats.fuelDisplay, 2)} ${c.stats.fuelUnit}`}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Print helper */}
+                  <div className="mt-10 flex flex-wrap gap-3 justify-center">
+                    <button
+                      onClick={() => window.print()}
+                      className="focus-ring bg-white text-black font-black uppercase tracking-widest text-xs sm:text-sm py-3 px-4 border-2 border-black shadow-[4px_4px_0px_#000]"
+                    >
+                      Print
+                    </button>
+                    <button
+                      onClick={() => setShowReport(false)}
+                      className="focus-ring bg-black border-2 border-[var(--line)] hover:border-[var(--amber)] text-white font-black uppercase tracking-widest text-xs sm:text-sm py-3 px-4"
+                    >
+                      Close Report
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        );
+      };
+
+      const inferModeFromFuelType = (fuelType) => {
+        const ft = String(fuelType ?? "").toLowerCase();
+        if (ft.includes("elec") || ft.includes("ev")) return "EV";
+        if (ft.includes("hybrid")) return "Hybrid";
+        return "ICE";
+      };
+
+      const VehicleCard = ({ vehicle, mode, logoError, setLogoError }) => {
+        return (
+          <div className="mt-8 sm:mt-12 bg-black border-4 border-[var(--line)] p-5 sm:p-8 relative">
+            <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-[var(--amber)]"></div>
+            <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-[var(--amber)]"></div>
+            <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-[var(--amber)]"></div>
+            <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-[var(--amber)]"></div>
+
+            <div className="relative w-full h-32 sm:h-48 border-2 border-[var(--line)] crt-screen mb-6 sm:mb-8 flex items-center justify-center overflow-hidden shadow-[0_0_20px_rgba(245,158,11,0.3)] p-2">
+              {!logoError ? (
+                <img
+                  src={getLogoUrl(vehicle.make)}
+                  alt={`${vehicle.make} logo`}
+                  onError={() => setLogoError(true)}
+                  className="absolute w-24 h-24 sm:w-40 sm:h-40 opacity-80"
+                  style={{
+                    objectFit: "contain",
+                    filter:
+                      "brightness(0) saturate(100%) invert(62%) sepia(91%) saturate(2258%) hue-rotate(1deg) brightness(103%) contrast(95%) drop-shadow(0 0 10px rgba(245,158,11,0.6))",
+                  }}
+                />
+              ) : (
+                <div className="absolute text-[var(--amber)] font-black uppercase tracking-widest text-sm sm:text-lg">
+                  {vehicle.make}
+                </div>
+              )}
+              <div className="z-10 flex flex-col items-center justify-center w-full max-w-[90%] mix-blend-plus-lighter px-2 sm:px-4 bg-black/80 py-2 sm:py-4 border border-[var(--amber)] [container-type:inline-size]">
+                <div className="font-black text-white tracking-[0.1em] sm:tracking-[0.2em] uppercase w-full break-words text-center drop-shadow-md text-[clamp(1rem,8cqi,2.5rem)] leading-tight">
+                  {vehicle.make}
+                </div>
+                <div className="font-mono text-[var(--amber)] tracking-widest w-full break-words text-center font-bold text-[clamp(0.75rem,5cqi,1.5rem)] mt-1">
+                  {vehicle.model}
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <EcoCarModel
+                label={`${vehicle.year} ${vehicle.make} ${vehicle.model}`}
+                mode={mode}
+                make={vehicle.make}
+                year={vehicle.year}
+                model={vehicle.model}
+                compact
+              />
+            </div>
+
+            <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+              <div className="flex-1 min-w-0 pr-0 md:pr-4 [container-type:inline-size]">
+                <div className="text-[10px] sm:text-xs font-black text-zinc-500 uppercase tracking-widest mb-1">Subject Profile</div>
+                <h3 className="font-black italic uppercase leading-none text-white drop-shadow-md break-words mt-1 text-[clamp(1.5rem,10cqi,3rem)]">
+                  {vehicle.year} <br />
+                  <span className="text-[var(--amber)]">{vehicle.model}</span>
+                </h3>
+                <div className="mt-3 text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+                  MPG: <span className="text-white">{vehicle.mpg || "?"}</span> | Fuel: <span className="text-white">{vehicle.fuelType}</span>
+                </div>
+              </div>
+              <div className="shrink-0 text-left md:text-right mt-2 md:mt-0 w-full md:w-auto">
+                <div className="text-[10px] sm:text-xs font-mono text-zinc-500 uppercase mb-1 font-black">Powertrain</div>
+                <div className="text-sm sm:text-base md:text-xl font-black uppercase text-black bg-[var(--amber)] px-3 sm:px-4 py-2 border-2 border-[var(--amber2)] inline-block shadow-[2px_2px_0px_#fff] whitespace-nowrap">
+                  {vehicle.fuelType}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const BenchItem = ({ label, value, color }) => (
+        <div className="bg-[var(--panel)] border-2 border-[var(--line)] p-3">
+          <div className="text-[10px] sm:text-xs uppercase tracking-widest font-black text-zinc-400">{label}</div>
+          <div className={"mt-2 font-mono font-black text-lg sm:text-xl " + color}>{value}</div>
+        </div>
+      );
+
+      const KeyValue = ({ k, v, accent = "text-white" }) => (
+        <div className="flex items-start justify-between gap-4">
+          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">{k}</div>
+          <div className={"text-xs sm:text-sm font-mono font-black text-right " + accent}>{v}</div>
+        </div>
+      );
+
+      const EcoCarModel = ({ label, mode, make, year, model, compact = false }) => {
+        const accent = mode === "EV" ? "var(--sky)" : mode === "Hybrid" ? "var(--teal)" : "var(--amber)";
+        const glow = mode === "EV" ? "rgba(34,211,238,0.6)" : mode === "Hybrid" ? "rgba(52,211,153,0.55)" : "rgba(34,197,94,0.55)";
+        const tint = mode === "EV" ? "#22d3ee" : mode === "Hybrid" ? "#34d399" : "#22c55e";
+        const [imgOk, setImgOk] = useState(true);
+        const [photoUrl, setPhotoUrl] = useState(null);
+        const [imgSource, setImgSource] = useState("commons"); // commons | unsplash
+        const unsplashUrl = useMemo(() => getCarPhotoUrl({ year, make, model }), [year, make, model]);
+        const triedUnsplashRef = useRef(false);
+
+        useEffect(() => {
+          let cancelled = false;
+          const key = commonsCacheKey(year, make, model);
+          setImgOk(true);
+          setImgSource("commons");
+          triedUnsplashRef.current = false;
+
+          (async () => {
+            try {
+              const cached = localStorage.getItem(key);
+              if (cached) {
+                if (!cancelled) setPhotoUrl(cached);
+                return;
+              }
+
+              const url = await fetchCommonsCarThumb({ year, make, model, thumbPx: 1400 });
+              if (cancelled) return;
+              if (url) {
+                setPhotoUrl(url);
+                try {
+                  localStorage.setItem(key, url);
+                } catch {}
+              } else {
+                // Fall back to Unsplash source.
+                setImgSource("unsplash");
+                setPhotoUrl(unsplashUrl);
+                triedUnsplashRef.current = true;
+              }
+            } catch {
+              if (cancelled) return;
+              setImgSource("unsplash");
+              setPhotoUrl(unsplashUrl);
+              triedUnsplashRef.current = true;
+            }
+          })();
+
+          return () => {
+            cancelled = true;
+          };
+        }, [year, make, model, unsplashUrl]);
+
+        return (
+          <div className={"bg-black border-4 border-[var(--line)] crt-screen overflow-hidden " + (compact ? "p-3" : "p-5 sm:p-6")}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">MODEL_VIEW</div>
+                <div className="mt-1 text-sm sm:text-base font-black text-white truncate">{label}</div>
+              </div>
+              <div className="shrink-0">
+                <span className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-black px-2 py-1" style={{ background: tint }}>
+                  {mode}
+                </span>
+              </div>
+            </div>
+
+            <div className={"mt-4 relative " + (compact ? "h-28" : "h-40 sm:h-48")}>
+              <div
+                className="absolute inset-0"
+                style={{
+                  background: `radial-gradient(closest-side at 55% 55%, ${glow}, rgba(0,0,0,0) 70%)`,
+                  filter: "blur(10px)",
+                  opacity: 0.9,
+                }}
+              />
+
+              {/* Real photo (best-effort). If it fails, we show the SVG model below. */}
+              {imgOk && photoUrl ? (
+                <img
+                  src={photoUrl}
+                  alt={label ? `${label} photo` : "Car photo"}
+                  className="absolute inset-0 w-full h-full object-cover opacity-80"
+                  style={{
+                    filter:
+                      "contrast(1.05) saturate(0.95) brightness(0.95) drop-shadow(0 0 18px rgba(34,197,94,0.25))",
+                  }}
+                  onError={() => {
+                    // If Commons image fails to load, try Unsplash once before giving up to SVG.
+                    if (!triedUnsplashRef.current) {
+                      triedUnsplashRef.current = true;
+                      setImgSource("unsplash");
+                      setPhotoUrl(unsplashUrl);
+                      return;
+                    }
+                    setImgOk(false);
+                  }}
+                />
+              ) : null}
+
+              {/* Image source tag (subtle) */}
+              <div className="absolute left-3 top-3 bg-black/70 border border-[var(--line)] px-2 py-1 text-[9px] font-mono uppercase tracking-widest font-black text-zinc-300">
+                IMG: {imgSource}
+              </div>
+
+              {/* Brand mark overlay */}
+              {make ? (
+                <img
+                  src={getLogoUrl(make)}
+                  alt=""
+                  className="absolute right-3 top-3 w-12 h-12 opacity-80 pointer-events-none"
+                  style={{
+                    objectFit: "contain",
+                    filter:
+                      "brightness(0) saturate(100%) invert(78%) sepia(28%) saturate(900%) hue-rotate(75deg) brightness(105%) contrast(92%)",
+                  }}
+                  onError={() => {}}
+                />
+              ) : null}
+
+              {/* Fallback SVG model */}
+              {!imgOk ? (
+                <svg viewBox="0 0 600 220" className="absolute inset-0 w-full h-full">
+                  <defs>
+                    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" stopColor="#0b1220" />
+                      <stop offset="0.55" stopColor={tint} stopOpacity="0.45" />
+                      <stop offset="1" stopColor="#0b1220" />
+                    </linearGradient>
+                    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
+                      <stop offset="0" stopColor="#22c55e" stopOpacity="0.15" />
+                      <stop offset="0.6" stopColor="#22d3ee" stopOpacity="0.18" />
+                      <stop offset="1" stopColor="#ffffff" stopOpacity="0.08" />
+                    </linearGradient>
+                    <filter id="glow">
+                      <feGaussianBlur stdDeviation="3.5" result="blur" />
+                      <feMerge>
+                        <feMergeNode in="blur" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                  </defs>
+
+                  <path d="M60 175 H540" stroke="rgba(255,255,255,0.18)" strokeWidth="2" strokeDasharray="8 10" />
+
+                  <g filter="url(#glow)">
+                    <circle cx="180" cy="175" r="30" fill="#030712" stroke={accent} strokeWidth="3" />
+                    <circle cx="180" cy="175" r="12" fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="2" />
+                    <circle cx="420" cy="175" r="30" fill="#030712" stroke={accent} strokeWidth="3" />
+                    <circle cx="420" cy="175" r="12" fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="2" />
+                  </g>
+
+                  <path
+                    d="M110 160
+                       C130 125, 165 105, 210 102
+                       L250 100
+                       C275 78, 312 66, 350 66
+                       L410 66
+                       C448 66, 478 76, 505 95
+                       L540 120
+                       C552 128, 556 138, 556 150
+                       L556 160
+                       L110 160 Z"
+                    fill="url(#body)"
+                    stroke={accent}
+                    strokeWidth="3"
+                    filter="url(#glow)"
+                  />
+
+                  <path
+                    d="M265 96
+                       C283 80, 307 72, 335 72
+                       L410 72
+                       C432 72, 450 78, 468 90
+                       L488 105
+                       L300 105 Z"
+                    fill="url(#glass)"
+                    stroke="rgba(255,255,255,0.12)"
+                  />
+
+                  <path d="M140 150 H520" stroke={accent} strokeOpacity="0.65" strokeWidth="2" />
+
+                  <text x="130" y="140" fill="rgba(255,255,255,0.55)" fontFamily="monospace" fontSize="12" fontWeight="700">
+                    {mode === "EV" ? "ZERO-TAILPIPE" : mode === "Hybrid" ? "BLENDED-DRIVE" : "COMBUSTION"}
+                  </text>
+                </svg>
+              ) : null}
+
+            </div>
+          </div>
+        );
+      };
+
+      const LineGraph = ({
+        title,
+        accent,
+        maxXDisplay,
+        xUnit,
+        lines,
+        hoverDistMi,
+        maxXMi,
+        onHover,
+        onLeave,
+        tooltip,
+        money = false,
+        currency = "USD",
+      }) => {
+        const maxY = Math.max(1, ...lines.map((l) => l.yAtMax)) * 1.15;
+        const xToSvg = (x) => (x / maxXMi) * 500;
+        const yToSvg = (y) => 200 - (y / maxY) * 200;
+
+        const dMi = hoverDistMi ?? null;
+        const tooltipData = dMi !== null ? tooltip?.render(dMi) : null;
+        const hoverX = dMi !== null ? xToSvg(dMi) : null;
+
+        return (
+          <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-8 relative">
+            <div className="flex items-center gap-3 mb-6 sm:mb-10 text-white border-b-2 border-zinc-800 pb-4">
+              <Icon name="TrendingUp" size={24} className="shrink-0" style={{ color: accent }} />
+              <h3 className="text-sm sm:text-lg md:text-xl font-black uppercase tracking-widest text-white leading-tight">{title}</h3>
+            </div>
+
+            <div
+              className="relative w-full aspect-[4/3] sm:aspect-[16/9] border-l-2 border-b-2 border-zinc-600 mb-6 bg-[var(--bg)] cursor-crosshair crt-screen"
+              onMouseMove={onHover}
+              onMouseLeave={onLeave}
+            >
+              <div className="absolute top-[25%] w-full border-t border-zinc-800 border-dashed"></div>
+              <div className="absolute top-[50%] w-full border-t border-zinc-800 border-dashed"></div>
+              <div className="absolute top-[75%] w-full border-t border-zinc-800 border-dashed"></div>
+
+              <svg viewBox="0 0 500 200" className="w-full h-full overflow-visible relative z-10">
+                {lines.map((l) => (
+                  <path
+                    key={l.label}
+                    d={`M 0 200 L 500 ${yToSvg(l.yAtMax)}`}
+                    stroke={l.color}
+                    strokeWidth={l.dashed ? 3 : 6}
+                    strokeDasharray={l.dashed ? "6,6" : "0"}
+                    fill="none"
+                    className={!l.dashed ? "drop-shadow-[0_0_10px_rgba(34,197,94,0.45)]" : ""}
+                  />
+                ))}
+
+                {hoverX !== null ? (
+                  <g className="transition-all duration-75 ease-out" transform={`translate(${Math.min(500, hoverX)}, 0)`}>
+                    <line x1="0" y1="0" x2="0" y2="200" stroke="white" strokeWidth="2" strokeDasharray="4,4" className="opacity-80" />
+                    {lines.map((l) => {
+                      const y = l.yAtMax * ((hoverDistMi ?? 0) / maxXMi);
+                      return <circle key={l.label} cx="0" cy={yToSvg(y)} r={l.dashed ? 5 : 8} fill={l.color} stroke="black" strokeWidth="2" />;
+                    })}
+                  </g>
+                ) : null}
+              </svg>
+
+              <div className="absolute -bottom-6 right-0 text-[10px] sm:text-xs text-zinc-500 font-mono font-bold uppercase">
+                {formatNumber(maxXDisplay, 0)} {xUnit}
+              </div>
+              <div
+                className="absolute top-2 left-2 text-[10px] sm:text-xs font-mono font-bold bg-black px-2 py-1 border border-[var(--line)] whitespace-nowrap"
+                style={{ color: accent }}
+              >
+                {money ? `${formatMoney(maxY, currency)} MAX` : `${formatNumber(maxY, 0)} MAX`}
+              </div>
+
+              {tooltipData ? (
+                <div
+                  className="absolute top-4 pointer-events-none bg-black border-2 border-white p-3 sm:p-4 z-50 min-w-[160px] sm:min-w-[200px] shadow-[4px_4px_0px_var(--amber)]"
+                  style={{
+                    left: `${Math.min(100, ((hoverDistMi ?? 0) / maxXMi) * 100)}%`,
+                    transform: `translateX(${(hoverDistMi ?? 0) / maxXMi > 0.6 ? "-110%" : "10%"})`,
+                  }}
+                >
+                  <div className="text-[10px] sm:text-xs font-black text-white mb-2 sm:mb-3 border-b-2 border-zinc-800 pb-1 sm:pb-2 uppercase tracking-widest whitespace-nowrap">
+                    {tooltipData.title}
+                  </div>
+                  <div className="space-y-1 sm:space-y-2 text-[10px] sm:text-xs font-bold font-mono">
+                    {tooltipData.rows.map((r) => (
+                      <div
+                        key={r.label}
+                        className={
+                          "flex justify-between gap-4 " +
+                          (r.strong ? "text-[10px] sm:text-sm font-black border-t border-zinc-800 pt-1 sm:pt-2 mt-1 sm:mt-2" : "")
+                        }
+                        style={{ color: r.color }}
+                      >
+                        <span>{r.label}:</span>
+                        <span>{r.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 sm:gap-6 text-[8px] sm:text-xs font-black uppercase tracking-widest mt-8 bg-[var(--panel)] p-3 sm:p-4 border-2 border-[var(--line)]">
+              {lines.map((l) => (
+                <div key={l.label} className="flex items-center gap-2 w-full sm:w-auto">
+                  <div
+                    className="w-3 sm:w-4 h-2 shrink-0"
+                    style={{ background: l.color, borderTop: l.dashed ? "2px dashed #000" : "none" }}
+                  ></div>
+                  <span className="text-zinc-200 truncate">{l.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      };
+
+      const BarCompare = ({ title, subtitle, items, money = false, currency = "USD" }) => {
+        const max = Math.max(1, ...items.map((i) => i.value)) * 1.15;
+        return (
+          <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-8 relative">
+            <div className="flex items-center gap-3 mb-6 sm:mb-10 text-white border-b-2 border-zinc-800 pb-4">
+              <Icon name="BarChart" size={24} className="text-[var(--amber)] shrink-0" />
+              <div className="min-w-0">
+                <h3 className="text-sm sm:text-lg md:text-xl font-black uppercase tracking-widest text-white leading-tight truncate">{title}</h3>
+                <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500 mt-1">{subtitle}</div>
+              </div>
+            </div>
+
+            <div className="relative w-full aspect-[4/3] sm:aspect-[16/9] border-l-2 border-b-2 border-zinc-600 bg-[var(--bg)] crt-screen flex items-end justify-around px-2 sm:px-8 pb-0 pt-10">
+              <div className="absolute top-[25%] w-full left-0 border-t border-zinc-800 border-dashed z-0"></div>
+              <div className="absolute top-[50%] w-full left-0 border-t border-zinc-800 border-dashed z-0"></div>
+              <div className="absolute top-[75%] w-full left-0 border-t border-zinc-800 border-dashed z-0"></div>
+
+              {items.map((it) => (
+                <div key={it.label} className="relative w-1/3 flex flex-col items-center justify-end h-full z-10 px-1">
+                  <span className="absolute -top-6 sm:-top-8 text-[10px] sm:text-lg font-black" style={{ color: it.color }}>
+                    {money ? formatMoney(it.value, currency) : formatNumber(it.value, 1)}
+                  </span>
+                  <div
+                    className="w-full transition-all duration-700 border-t-2 sm:border-t-4 border-white/30"
+                    style={{
+                      height: `${Math.max(1, (it.value / max) * 100)}%`,
+                      background: it.color,
+                      boxShadow: "0 0 20px rgba(34,197,94,0.25)",
+                      opacity: it.label === "Truck" ? 0.82 : 0.92,
+                    }}
+                  ></div>
+                  <span className="absolute -bottom-6 sm:-bottom-8 text-[8px] sm:text-xs font-black text-zinc-300 uppercase text-center w-full truncate px-1">
+                    {it.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      };
+
+      const MetricMini = ({ label, value, accent }) => (
+        <div className="bg-[var(--panel)] border-2 border-[var(--line)] p-3">
+          <div className="text-[10px] uppercase tracking-widest font-black text-zinc-400">{label}</div>
+          <div className={"mt-2 font-mono font-black text-sm sm:text-base break-words " + accent}>{value}</div>
+        </div>
+      );
+
+      const SummaryCard = ({ title, value, accent }) => (
+        <div className="bg-black border-4 border-[var(--line)] p-4 sm:p-6">
+          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-widest font-black text-zinc-500">
+            {title}
+          </div>
+          <div className={"mt-3 text-2xl sm:text-3xl font-black font-mono " + accent}>{value}</div>
+        </div>
+      );
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
